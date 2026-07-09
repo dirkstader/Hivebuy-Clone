@@ -82,7 +82,7 @@ export default function RequestNew() {
   const canSubmit = title.trim() !== "" && costCenterId !== "" && lines.some((l) => l.description.trim() !== "");
 
   return (
-    <div className="p-6 space-y-5 max-w-3xl">
+    <div className="p-4 sm:p-6 space-y-5 max-w-3xl">
       <div>
         <h1 className="text-xl font-semibold" data-testid="text-page-title">Neue Bestellanforderung</h1>
         <p className="text-sm text-muted-foreground mt-1">Fülle die Details aus und reiche die Anforderung zur Freigabe ein.</p>
@@ -96,7 +96,7 @@ export default function RequestNew() {
             <Input id="title" data-testid="input-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="z.B. Nachbestellung Hörgeräte" />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>Kostenstelle</Label>
               <Select value={costCenterId} onValueChange={setCostCenterId}>
@@ -129,7 +129,7 @@ export default function RequestNew() {
       </Card>
 
       <Card className="border-card-border">
-        <CardHeader className="flex flex-row items-center justify-between">
+        <CardHeader className="flex flex-wrap flex-row items-center justify-between gap-2">
           <CardTitle className="text-sm">Positionen</CardTitle>
           <Button variant="outline" size="sm" onClick={() => setAmazonOpen(true)} data-testid="button-open-amazon-punchout">
             <ShoppingCart className="h-4 w-4" /> Bei Amazon Business einkaufen
@@ -137,12 +137,12 @@ export default function RequestNew() {
         </CardHeader>
         <CardContent className="space-y-3">
           {lines.map((line, i) => (
-            <div key={i} className="flex items-start gap-2" data-testid={`row-line-item-${i}`}>
+            <div key={i} className="flex flex-wrap items-start gap-2" data-testid={`row-line-item-${i}`}>
               <Input
                 placeholder="Beschreibung"
                 value={line.description}
                 onChange={(e) => updateLine(i, { description: e.target.value })}
-                className="flex-1"
+                className="flex-1 min-w-[140px]"
                 data-testid={`input-line-description-${i}`}
               />
               <Input
@@ -152,7 +152,7 @@ export default function RequestNew() {
                 placeholder="Menge"
                 value={line.quantity}
                 onChange={(e) => updateLine(i, { quantity: Number(e.target.value) })}
-                className="w-24"
+                className="w-20 sm:w-24"
                 data-testid={`input-line-quantity-${i}`}
               />
               <Input
@@ -162,7 +162,7 @@ export default function RequestNew() {
                 placeholder="Preis €"
                 value={line.unitPrice}
                 onChange={(e) => updateLine(i, { unitPrice: Number(e.target.value) })}
-                className="w-28"
+                className="w-24 sm:w-28"
                 data-testid={`input-line-price-${i}`}
               />
               <Button variant="ghost" size="icon" onClick={() => removeLine(i)} disabled={lines.length === 1} data-testid={`button-remove-line-${i}`}>

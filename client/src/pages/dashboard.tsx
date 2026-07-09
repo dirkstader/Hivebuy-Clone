@@ -43,7 +43,7 @@ export default function Dashboard() {
   const budgetPct = data && data.totalBudget > 0 ? Math.min(100, Math.round((data.totalSpent / data.totalBudget) * 100)) : 0;
 
   return (
-    <div className="p-6 space-y-6 max-w-6xl">
+    <div className="p-4 sm:p-6 space-y-6 max-w-6xl">
       <div>
         <h1 className="text-xl font-semibold" data-testid="text-page-title">Übersicht</h1>
         <p className="text-sm text-muted-foreground mt-1">
@@ -52,11 +52,11 @@ export default function Dashboard() {
       </div>
 
       {isLoading ? (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
           {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-20 w-full" />)}
         </div>
       ) : (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
           <KpiCard icon={FileText} label="Zur Freigabe" value={data?.pendingApprovals ?? 0} testId="kpi-pending-approvals" />
           <KpiCard icon={Package} label="Offene Bestellungen" value={data?.openOrders ?? 0} testId="kpi-open-orders" />
           <KpiCard icon={AlertTriangle} label="Rechnungsabweichungen" value={data?.discrepancyInvoices ?? 0} testId="kpi-discrepancies" />

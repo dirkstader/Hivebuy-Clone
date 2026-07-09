@@ -20,6 +20,7 @@ type RequestDetailResponse = PurchaseRequest & { lineItems: RequestLineItem[]; a
 const ACTION_LABELS: Record<string, string> = {
   created: "Anforderung erstellt",
   submitted: "Zur Freigabe eingereicht",
+  pending_approval: "Zur Freigabe eingereicht",
   approved: "Freigegeben",
   rejected: "Abgelehnt",
   ordered: "Bestellung ausgelöst",
@@ -57,7 +58,7 @@ export default function RequestDetail() {
 
   if (isLoading) {
     return (
-      <div className="p-6 space-y-4 max-w-4xl">
+      <div className="p-4 sm:p-6 space-y-4 max-w-4xl">
         <Skeleton className="h-8 w-64" />
         <Skeleton className="h-40 w-full" />
       </div>
@@ -75,9 +76,10 @@ export default function RequestDetail() {
   const canApprove = isApprover && data.status === "pending_approval";
   const canOrder = isPurchasing && data.status === "approved";
   const canReceive = isPurchasing && data.status === "ordered";
+  const canSubmit = data.status === "draft" && data.requesterId === user?.id;
 
   return (
-    <div className="p-6 space-y-5 max-w-4xl">
+    <div className="p-4 sm:p-6 space-y-5 max-w-4xl">
       <Link href="/requests" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground" data-testid="link-back-requests">
         <ArrowLeft className="h-3.5 w-3.5" /> Zurück zur Übersicht
       </Link>
@@ -133,8 +135,8 @@ export default function RequestDetail() {
           <CardTitle className="text-sm">Positionen</CardTitle>
         </CardHeader>
         <CardContent className="pt-0">
-          <div className="rounded-md border border-card-border overflow-hidden">
-            <table className="w-full text-sm">
+          <div className="rounded-md border border-card-border overflow-x-auto">
+            <table className="w-full text-sm min-w-[480px]">
               <thead className="bg-muted/50">
                 <tr className="text-left text-xs text-muted-foreground">
                   <th className="px-3 py-2 font-medium">Beschreibung</th>
@@ -167,12 +169,21 @@ export default function RequestDetail() {
         </Card>
       )}
 
-      {(canApprove || canOrder || canReceive) && (
+      {(canApprove || canOrder || canReceive || canSubmit) && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">Aktion</CardTitle>
           </CardHeader>
           <CardContent className="pt-0 space-y-3">
+            {canSubmit && (
+              <Button
+                onClick={() => transition.mutate({ status: "pending_approval" })}
+                disabled={transition.isPending}
+                data-testid="button-submit-draft"
+              >
+                <Send className="h-4 w-4" /> Zur Freigabe einreichen
+              </Button>
+            )}
             {canApprove && (
               <>
                 <Textarea

@@ -11,14 +11,14 @@ export default function Orders() {
   const supplierName = (id: number) => suppliers?.find((s) => s.id === id)?.name ?? "–";
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
+    <div className="p-4 sm:p-6 space-y-5 max-w-6xl">
       <div>
         <h1 className="text-xl font-semibold" data-testid="text-page-title">Bestellungen</h1>
         <p className="text-sm text-muted-foreground mt-1">Automatisch erzeugt aus freigegebenen Anforderungen.</p>
       </div>
 
-      <div className="rounded-md border border-card-border overflow-hidden">
-        <table className="w-full text-sm">
+      <div className="rounded-md border border-card-border overflow-x-auto">
+        <table className="w-full text-sm min-w-[560px]">
           <thead className="bg-muted/50">
             <tr className="text-left text-xs text-muted-foreground">
               <th className="px-4 py-2.5 font-medium">Bestellnr.</th>
