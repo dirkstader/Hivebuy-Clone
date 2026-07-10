@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS cost_centers (
   name TEXT NOT NULL,
   code TEXT NOT NULL UNIQUE,
   owner TEXT NOT NULL DEFAULT '',
+  city TEXT NOT NULL DEFAULT '',
   annual_budget REAL NOT NULL DEFAULT 0,
   spent REAL NOT NULL DEFAULT 0
 );
@@ -56,7 +57,9 @@ CREATE TABLE IF NOT EXISTS catalog_items (
   description TEXT NOT NULL DEFAULT '',
   unit TEXT NOT NULL DEFAULT 'Stk.',
   unit_price REAL NOT NULL DEFAULT 0,
-  category TEXT NOT NULL DEFAULT ''
+  category TEXT NOT NULL DEFAULT '',
+  brand TEXT NOT NULL DEFAULT '',
+  ean TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS purchase_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,6 +138,7 @@ export interface IStorage {
   getCostCenter(id: number): Promise<CostCenter | undefined>;
   createCostCenter(cc: InsertCostCenter): Promise<CostCenter>;
   updateCostCenterSpent(id: number, delta: number): Promise<void>;
+  deleteCostCenter(id: number): Promise<void>;
 
   // Suppliers
   listSuppliers(): Promise<Supplier[]>;
@@ -196,6 +200,7 @@ export class DatabaseStorage implements IStorage {
     if (!cc) return;
     db.update(costCenters).set({ spent: cc.spent + delta }).where(eq(costCenters.id, id)).run();
   }
+  async deleteCostCenter(id: number) { db.delete(costCenters).where(eq(costCenters.id, id)).run(); }
 
   async listSuppliers() { return db.select().from(suppliers).all(); }
   async getSupplier(id: number) { return db.select().from(suppliers).where(eq(suppliers.id, id)).get(); }

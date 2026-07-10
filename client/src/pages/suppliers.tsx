@@ -24,6 +24,7 @@ export default function Suppliers() {
   const { toast } = useToast();
   const [selected, setSelected] = useState<Supplier | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [catalogSearch, setCatalogSearch] = useState("");
 
   const { data: suppliers, isLoading } = useQuery<Supplier[]>({ queryKey: ["/api/suppliers"] });
   const { data: supplierDetail } = useQuery<Supplier & { catalogItems: CatalogItem[] }>({
@@ -177,28 +178,71 @@ export default function Suppliers() {
                 </CardContent>
               </Card>
               <div>
-                <p className="text-sm font-medium mb-2">Katalogartikel</p>
+                <div className="flex items-center justify-between gap-3 mb-2">
+                  <p className="text-sm font-medium">
+                    Katalogartikel {supplierDetail ? `(${supplierDetail.catalogItems.length})` : ""}
+                  </p>
+                  {(supplierDetail?.catalogItems.length ?? 0) > 10 && (
+                    <Input
+                      value={catalogSearch}
+                      onChange={(e) => setCatalogSearch(e.target.value)}
+                      placeholder="Artikel, Marke oder SKU/EAN suchen…"
+                      className="h-8 max-w-xs"
+                      data-testid="input-catalog-search"
+                    />
+                  )}
+                </div>
                 <div className="rounded-md border border-card-border overflow-x-auto">
-                  <table className="w-full text-sm min-w-[420px]">
+                  <table className="w-full text-sm min-w-[560px]">
                     <thead className="bg-muted/50">
                       <tr className="text-left text-xs text-muted-foreground">
-                        <th className="px-3 py-2 font-medium">SKU</th>
+                        <th className="px-3 py-2 font-medium">SKU / EAN</th>
                         <th className="px-3 py-2 font-medium">Artikel</th>
+                        <th className="px-3 py-2 font-medium">Marke</th>
+                        <th className="px-3 py-2 font-medium">Kategorie</th>
                         <th className="px-3 py-2 font-medium text-right">Preis</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
-                      {(supplierDetail?.catalogItems ?? []).length === 0 ? (
-                        <tr><td colSpan={3} className="px-3 py-6 text-center text-muted-foreground">Keine Katalogartikel hinterlegt.</td></tr>
-                      ) : (
-                        supplierDetail!.catalogItems.map((c) => (
-                          <tr key={c.id} data-testid={`row-catalog-item-${c.id}`}>
-                            <td className="px-3 py-2 font-mono text-xs">{c.sku}</td>
-                            <td className="px-3 py-2">{c.name}</td>
-                            <td className="px-3 py-2 text-right">{formatCurrency(c.unitPrice)} / {c.unit}</td>
-                          </tr>
-                        ))
-                      )}
+                      {(() => {
+                        const items = supplierDetail?.catalogItems ?? [];
+                        const q = catalogSearch.trim().toLowerCase();
+                        const filtered = q
+                          ? items.filter((c) =>
+                              c.name.toLowerCase().includes(q) ||
+                              c.sku.toLowerCase().includes(q) ||
+                              (c.brand ?? "").toLowerCase().includes(q) ||
+                              (c.category ?? "").toLowerCase().includes(q)
+                            )
+                          : items;
+                        const visible = filtered.slice(0, 100);
+                        if (items.length === 0) {
+                          return <tr><td colSpan={5} className="px-3 py-6 text-center text-muted-foreground">Keine Katalogartikel hinterlegt.</td></tr>;
+                        }
+                        if (filtered.length === 0) {
+                          return <tr><td colSpan={5} className="px-3 py-6 text-center text-muted-foreground">Keine Treffer für „{catalogSearch}“.</td></tr>;
+                        }
+                        return (
+                          <>
+                            {visible.map((c) => (
+                              <tr key={c.id} data-testid={`row-catalog-item-${c.id}`}>
+                                <td className="px-3 py-2 font-mono text-xs">{c.sku}</td>
+                                <td className="px-3 py-2">{c.name}</td>
+                                <td className="px-3 py-2 text-xs text-muted-foreground">{c.brand}</td>
+                                <td className="px-3 py-2 text-xs text-muted-foreground">{c.category}</td>
+                                <td className="px-3 py-2 text-right">{formatCurrency(c.unitPrice)} / {c.unit}</td>
+                              </tr>
+                            ))}
+                            {filtered.length > visible.length && (
+                              <tr>
+                                <td colSpan={5} className="px-3 py-2 text-center text-xs text-muted-foreground">
+                                  {filtered.length - visible.length} weitere Artikel — bitte Suche verfeinern.
+                                </td>
+                              </tr>
+                            )}
+                          </>
+                        );
+                      })()}
                     </tbody>
                   </table>
                 </div>

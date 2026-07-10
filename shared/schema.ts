@@ -26,6 +26,7 @@ export const costCenters = sqliteTable("cost_centers", {
   name: text("name").notNull(),
   code: text("code").notNull().unique(),
   owner: text("owner").notNull().default(""),
+  city: text("city").notNull().default(""),
   annualBudget: real("annual_budget").notNull().default(0),
   spent: real("spent").notNull().default(0),
 });
@@ -61,6 +62,8 @@ export const catalogItems = sqliteTable("catalog_items", {
   unit: text("unit").notNull().default("Stk."),
   unitPrice: real("unit_price").notNull().default(0),
   category: text("category").notNull().default(""),
+  brand: text("brand").notNull().default(""),
+  ean: text("ean").notNull().default(""),
 });
 
 export const insertCatalogItemSchema = createInsertSchema(catalogItems).omit({ id: true });

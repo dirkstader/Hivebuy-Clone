@@ -30,7 +30,9 @@ export default function CostCenters() {
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <p className="text-sm font-medium">{c.name}</p>
-                      <p className="text-xs text-muted-foreground">{c.code} · {c.owner}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {c.code}{c.city ? ` · ${c.city}` : ""}{c.owner ? ` · ${c.owner}` : ""}
+                      </p>
                     </div>
                     <p className={`text-sm font-semibold ${over ? "text-destructive" : ""}`}>{pct.toFixed(0)}%</p>
                   </div>

@@ -1,24 +1,38 @@
 import { storage } from "./storage";
+import { PYLO_COST_CENTERS, PYLO_CATALOG_ITEMS } from "./pylo-data";
 
 export async function seedIfEmpty() {
   const users = await storage.listUsers();
   if (users.length > 0) return;
 
-  console.log("[seed] Populating demo data for OUNDA Procure...");
+  console.log("[seed] Populating OUNDA Procure with real Pylo data (Kostenstellen & Artikelstammdaten)...");
 
-  // Cost centers (OUNDA optician/hearing aid retail stores + HQ departments)
-  const ccHQ = await storage.createCostCenter({ name: "Zentrale Münster", code: "CC-100", owner: "Dirk Stader", annualBudget: 180000, spent: 0 });
-  const ccFiliale1 = await storage.createCostCenter({ name: "Filiale Münster Altstadt", code: "CC-201", owner: "Sabine Krüger", annualBudget: 65000, spent: 0 });
-  const ccFiliale2 = await storage.createCostCenter({ name: "Filiale Langenfeld", code: "CC-202", owner: "Markus Vogt", annualBudget: 58000, spent: 0 });
-  const ccIT = await storage.createCostCenter({ name: "IT & Digitalisierung", code: "CC-300", owner: "Jana Weiss", annualBudget: 95000, spent: 0 });
-  const ccMarketing = await storage.createCostCenter({ name: "Marketing (Echte Optiker)", code: "CC-400", owner: "Tobias Reimann", annualBudget: 72000, spent: 0 });
+  // Cost centers = echte Betriebe/Standorte aus der Pylo-Datenbank (106 aktive Filialen, Geschlossene ausgeschlossen)
+  const pyloCostCenters = await Promise.all(
+    PYLO_COST_CENTERS.map((cc) =>
+      storage.createCostCenter({
+        name: cc.name,
+        code: cc.code,
+        owner: cc.owner,
+        city: cc.city,
+        annualBudget: cc.annualBudget,
+        spent: cc.spent,
+      })
+    )
+  );
+  const ccByCode = new Map(pyloCostCenters.map((cc) => [cc.code, cc]));
+  const ccHQ = pyloCostCenters.find((cc) => cc.name.includes("Verwaltung")) ?? pyloCostCenters[0];
+  const ccFiliale1 = pyloCostCenters[1] ?? ccHQ;
+  const ccFiliale2 = pyloCostCenters[2] ?? ccHQ;
+  const ccIT = ccHQ;
+  const ccMarketing = pyloCostCenters[3] ?? ccHQ;
 
   // Users
   const admin = await storage.createUser({ name: "Dirk Stader", email: "dirk@stader.de", password: "demo1234", role: "finance", department: "Geschäftsführung", costCenterId: ccHQ.id });
-  const approver1 = await storage.createUser({ name: "Sabine Krüger", email: "sabine.krueger@ounda.de", password: "demo1234", role: "approver", department: "Filialleitung Münster", costCenterId: ccFiliale1.id });
-  const approver2 = await storage.createUser({ name: "Markus Vogt", email: "markus.vogt@ounda.de", password: "demo1234", role: "approver", department: "Filialleitung Langenfeld", costCenterId: ccFiliale2.id });
+  const approver1 = await storage.createUser({ name: "Sabine Krüger", email: "sabine.krueger@ounda.de", password: "demo1234", role: "approver", department: `Filialleitung ${ccFiliale1.name}`, costCenterId: ccFiliale1.id });
+  const approver2 = await storage.createUser({ name: "Markus Vogt", email: "markus.vogt@ounda.de", password: "demo1234", role: "approver", department: `Filialleitung ${ccFiliale2.name}`, costCenterId: ccFiliale2.id });
   const purchasing = await storage.createUser({ name: "Jana Weiss", email: "jana.weiss@ounda.de", password: "demo1234", role: "purchasing", department: "Einkauf & IT", costCenterId: ccIT.id });
-  const requester1 = await storage.createUser({ name: "Lea Brandt", email: "lea.brandt@ounda.de", password: "demo1234", role: "requester", department: "Filiale Münster Altstadt", costCenterId: ccFiliale1.id });
+  const requester1 = await storage.createUser({ name: "Lea Brandt", email: "lea.brandt@ounda.de", password: "demo1234", role: "requester", department: ccFiliale1.name, costCenterId: ccFiliale1.id });
   const requester2 = await storage.createUser({ name: "Tobias Reimann", email: "tobias.reimann@ounda.de", password: "demo1234", role: "requester", department: "Marketing", costCenterId: ccMarketing.id });
 
   // Suppliers
@@ -38,6 +52,38 @@ export async function seedIfEmpty() {
   await storage.createCatalogItem({ supplierId: supOffice.id, sku: "OFF-PAP-A4", name: "Kopierpapier A4 80g (Palette)", description: "10 Kartons à 5 Pack", unit: "Palette", unitPrice: 340.0, category: "Büromaterial" });
   await storage.createCatalogItem({ supplierId: supIT.id, sku: "NIT-MON-27", name: "27\" Business-Monitor", description: "IPS, 75Hz, USB-C", unit: "Stk.", unitPrice: 279.0, category: "IT-Hardware" });
   await storage.createCatalogItem({ supplierId: supIT.id, sku: "NIT-POS-05", name: "Kassensystem POS-Terminal", description: "Touch-Kassenterminal inkl. Software-Lizenz", unit: "Stk.", unitPrice: 890.0, category: "IT-Hardware" });
+
+  // Echte Artikelstammdaten aus Pylo (Brillenfassungen etc.) — neue Lieferanten je Händler anlegen
+  const pyloSupplierByName = new Map<string, Awaited<ReturnType<typeof storage.createSupplier>>>();
+  for (const item of PYLO_CATALOG_ITEMS) {
+    const supplierName = item.supplierName || "Sonstiger Pylo-Lieferant";
+    if (!pyloSupplierByName.has(supplierName)) {
+      const sup = await storage.createSupplier({
+        name: supplierName,
+        category: "Brillen & Optik (Pylo)",
+        contactName: "",
+        email: "",
+        phone: "",
+        address: "",
+        rating: 4,
+        status: "active",
+      });
+      pyloSupplierByName.set(supplierName, sup);
+    }
+    const sup = pyloSupplierByName.get(supplierName)!;
+    await storage.createCatalogItem({
+      supplierId: sup.id,
+      sku: item.sku,
+      name: item.name,
+      description: item.description,
+      unit: item.unit,
+      unitPrice: item.unitPrice,
+      category: item.category,
+      brand: item.brand,
+      ean: item.ean,
+    });
+  }
+  console.log(`[seed] ${PYLO_CATALOG_ITEMS.length} Pylo-Artikel in den Katalog importiert (${pyloSupplierByName.size} Lieferanten).`);
 
   const now = () => new Date().toISOString();
   const daysAgo = (n: number) => new Date(Date.now() - n * 86400000).toISOString();
