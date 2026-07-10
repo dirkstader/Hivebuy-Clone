@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { Plus, Trash2, ShoppingCart } from "lucide-react";
+import { Plus, Trash2, ShoppingCart, PackageSearch } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,6 +15,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { formatCurrency } from "@/lib/format";
 import { useAuth } from "@/lib/auth-context";
 import { AmazonPunchoutDialog } from "@/components/amazon-punchout-dialog";
+import { SupplierCatalogDialog } from "@/components/supplier-catalog-dialog";
 import type { CostCenter, Supplier } from "@shared/schema";
 
 interface DraftLine {
@@ -34,6 +35,7 @@ export default function RequestNew() {
   const [supplierId, setSupplierId] = useState<string>("");
   const [lines, setLines] = useState<DraftLine[]>([{ description: "", quantity: 1, unitPrice: 0 }]);
   const [amazonOpen, setAmazonOpen] = useState(false);
+  const [catalogOpen, setCatalogOpen] = useState(false);
 
   const { data: costCenters } = useQuery<CostCenter[]>({ queryKey: ["/api/cost-centers"] });
   const { data: suppliers } = useQuery<Supplier[]>({ queryKey: ["/api/suppliers"] });
@@ -53,6 +55,16 @@ export default function RequestNew() {
     });
     toast({ title: "Amazon-Warenkorb übernommen", description: `${imported.length} Position(en) hinzugefügt.` });
   };
+
+  const importCatalogLines = (imported: DraftLine[]) => {
+    setLines((prev) => {
+      const withoutEmpty = prev.filter((l) => l.description.trim() !== "" || l.unitPrice > 0);
+      return [...withoutEmpty, ...imported];
+    });
+    toast({ title: "Katalogartikel übernommen", description: `${imported.length} Position(en) hinzugefügt.` });
+  };
+
+  const selectedSupplier = suppliers?.find((s) => String(s.id) === supplierId);
 
   const createMutation = useMutation({
     mutationFn: async (status: "draft" | "pending_approval") => {
@@ -131,9 +143,21 @@ export default function RequestNew() {
       <Card className="border-card-border">
         <CardHeader className="flex flex-wrap flex-row items-center justify-between gap-2">
           <CardTitle className="text-sm">Positionen</CardTitle>
-          <Button variant="outline" size="sm" onClick={() => setAmazonOpen(true)} data-testid="button-open-amazon-punchout">
-            <ShoppingCart className="h-4 w-4" /> Bei Amazon Business einkaufen
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setCatalogOpen(true)}
+              disabled={!supplierId}
+              title={!supplierId ? "Bitte zuerst einen Lieferanten auswählen" : undefined}
+              data-testid="button-open-supplier-catalog"
+            >
+              <PackageSearch className="h-4 w-4" /> Aus Katalog wählen
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setAmazonOpen(true)} data-testid="button-open-amazon-punchout">
+              <ShoppingCart className="h-4 w-4" /> Bei Amazon Business einkaufen
+            </Button>
+          </div>
         </CardHeader>
         <CardContent className="space-y-3">
           {lines.map((line, i) => (
@@ -202,6 +226,13 @@ export default function RequestNew() {
       </div>
 
       <AmazonPunchoutDialog open={amazonOpen} onOpenChange={setAmazonOpen} onImport={importAmazonLines} />
+      <SupplierCatalogDialog
+        open={catalogOpen}
+        onOpenChange={setCatalogOpen}
+        supplierId={supplierId ? Number(supplierId) : null}
+        supplierName={selectedSupplier?.name}
+        onImport={importCatalogLines}
+      />
     </div>
   );
 }
