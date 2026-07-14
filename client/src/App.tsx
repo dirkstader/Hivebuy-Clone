@@ -18,6 +18,7 @@ import Suppliers from "@/pages/suppliers";
 import Orders from "@/pages/orders";
 import Invoices from "@/pages/invoices";
 import CostCenters from "@/pages/cost-centers";
+import Analytics from "@/pages/analytics";
 import NotFound from "@/pages/not-found";
 
 function AppRouter() {
@@ -31,6 +32,7 @@ function AppRouter() {
       <Route path="/orders" component={Orders} />
       <Route path="/invoices" component={Invoices} />
       <Route path="/cost-centers" component={CostCenters} />
+      <Route path="/analytics" component={Analytics} />
       <Route component={NotFound} />
     </Switch>
   );

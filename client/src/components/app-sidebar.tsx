@@ -1,6 +1,6 @@
 import { Link, useLocation } from "wouter";
 import {
-  LayoutDashboard, FileText, Truck, Package, Receipt, Building2, LogOut,
+  LayoutDashboard, FileText, Truck, Package, Receipt, Building2, BarChart3, LogOut,
 } from "lucide-react";
 import {
   Sidebar, SidebarContent, SidebarGroup, SidebarGroupLabel, SidebarGroupContent,
@@ -17,6 +17,7 @@ const NAV_ITEMS = [
   { title: "Lieferanten & Katalog", url: "/suppliers", icon: Truck, roles: ["requester", "approver", "purchasing", "finance"] },
   { title: "Rechnungsabgleich", url: "/invoices", icon: Receipt, roles: ["purchasing", "finance"] },
   { title: "Kostenstellen", url: "/cost-centers", icon: Building2, roles: ["approver", "finance"] },
+  { title: "Auswertungen", url: "/analytics", icon: BarChart3, roles: ["approver", "purchasing", "finance"] },
 ];
 
 function initials(name: string) {

@@ -601,5 +601,44 @@ export async function registerRoutes(
     });
   });
 
+  // ---------- Spend analytics (finance/purchasing) ----------
+  app.get("/api/analytics", requireRole(...PURCHASING_ROLES, "approver"), async (_req, res) => {
+    const [requests, invoices, costCenters, suppliers] = await Promise.all([
+      storage.listPurchaseRequests(),
+      storage.listInvoices(),
+      storage.listCostCenters(),
+      storage.listSuppliers(),
+    ]);
+
+    const spendByCostCenter = [...costCenters]
+      .sort((a, b) => (b.spent + b.committed) - (a.spent + a.committed))
+      .slice(0, 8)
+      .map((c) => ({ name: c.name, code: c.code, spent: c.spent, committed: c.committed }));
+
+    const supplierName = new Map(suppliers.map((s) => [s.id, s.name]));
+    const bySupplier = new Map<number, number>();
+    for (const inv of invoices) bySupplier.set(inv.supplierId, (bySupplier.get(inv.supplierId) ?? 0) + inv.amount);
+    const spendBySupplier = Array.from(bySupplier.entries())
+      .map(([id, amount]) => ({ name: supplierName.get(id) ?? `#${id}`, amount }))
+      .sort((a, b) => b.amount - a.amount)
+      .slice(0, 8);
+
+    const byMonth = new Map<string, number>();
+    for (const inv of invoices) {
+      const month = (inv.receivedAt ?? "").slice(0, 7); // YYYY-MM
+      if (month) byMonth.set(month, (byMonth.get(month) ?? 0) + inv.amount);
+    }
+    const spendByMonth = Array.from(byMonth.entries())
+      .map(([month, amount]) => ({ month, amount }))
+      .sort((a, b) => a.month.localeCompare(b.month));
+
+    const requestsByStatus = requests.reduce((acc: Record<string, number>, r) => {
+      acc[r.status] = (acc[r.status] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    res.json({ spendByCostCenter, spendBySupplier, spendByMonth, requestsByStatus });
+  });
+
   return httpServer;
 }
