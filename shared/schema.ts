@@ -183,6 +183,28 @@ export interface PunchoutCartLine {
   imageUrl?: string;
 }
 
+// ---------- Approval Steps (multi-level approval chain per request) ----------
+// A request's approval chain is a sequence of steps resolved in stepOrder. Each step is
+// satisfied by any user whose role covers approverRole (finance covers approver too). The
+// chain length depends on the request amount — see buildApprovalChain in server/routes.ts.
+export const APPROVAL_STEP_STATUSES = ["pending", "approved", "rejected"] as const;
+export type ApprovalStepStatus = (typeof APPROVAL_STEP_STATUSES)[number];
+
+export const approvalSteps = sqliteTable("approval_steps", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  requestId: integer("request_id").notNull(),
+  stepOrder: integer("step_order").notNull(),
+  approverRole: text("approver_role").notNull(), // required role: approver | finance
+  status: text("status").notNull().default("pending"),
+  decidedById: integer("decided_by_id"),
+  comment: text("comment").notNull().default(""),
+  decidedAt: text("decided_at"),
+});
+
+export const insertApprovalStepSchema = createInsertSchema(approvalSteps).omit({ id: true });
+export type InsertApprovalStep = z.infer<typeof insertApprovalStepSchema>;
+export type ApprovalStep = typeof approvalSteps.$inferSelect;
+
 // ---------- Activity Log (for approvals/audit trail) ----------
 export const activityLog = sqliteTable("activity_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),

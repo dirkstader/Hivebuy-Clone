@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useParams, Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { ArrowLeft, Check, X, ShoppingCart, PackageCheck, Send } from "lucide-react";
+import { ArrowLeft, Check, X, ShoppingCart, PackageCheck, Send, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
@@ -9,24 +9,36 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { useAuth } from "@/lib/auth-context";
+import { useAuth, ROLE_LABELS } from "@/lib/auth-context";
 import {
   formatCurrency, formatDate, formatDateTime, REQUEST_STATUS_LABELS, statusBadgeVariant,
 } from "@/lib/format";
-import type { PurchaseRequest, RequestLineItem, ActivityLog, Supplier, CostCenter } from "@shared/schema";
+import type { PurchaseRequest, RequestLineItem, ActivityLog, ApprovalStep, Supplier, CostCenter, User } from "@shared/schema";
 
-type RequestDetailResponse = PurchaseRequest & { lineItems: RequestLineItem[]; activity: ActivityLog[] };
+type RequestDetailResponse = PurchaseRequest & {
+  lineItems: RequestLineItem[];
+  activity: ActivityLog[];
+  approvalSteps: ApprovalStep[];
+};
 
 const ACTION_LABELS: Record<string, string> = {
   created: "Anforderung erstellt",
   submitted: "Zur Freigabe eingereicht",
   pending_approval: "Zur Freigabe eingereicht",
+  step_approved: "Freigabestufe genehmigt",
   approved: "Freigegeben",
   rejected: "Abgelehnt",
   ordered: "Bestellung ausgelöst",
   received: "Wareneingang gebucht",
   closed: "Abgeschlossen",
 };
+
+// Mirrors canActOnStep in server/routes.ts — finance covers every step, approver only
+// covers approver steps. Authoritative check is server-side; this just gates the UI.
+function canActOnStep(role: string | undefined, stepRole: string): boolean {
+  if (role === "finance") return true;
+  return role === "approver" && stepRole === "approver";
+}
 
 export default function RequestDetail() {
   const { id } = useParams<{ id: string }>();
@@ -39,6 +51,15 @@ export default function RequestDetail() {
   });
   const { data: suppliers } = useQuery<Supplier[]>({ queryKey: ["/api/suppliers"] });
   const { data: costCenters } = useQuery<CostCenter[]>({ queryKey: ["/api/cost-centers"] });
+  const { data: users } = useQuery<User[]>({ queryKey: ["/api/users"] });
+
+  const invalidateAll = () => {
+    queryClient.invalidateQueries({ queryKey: ["/api/purchase-requests", id] });
+    queryClient.invalidateQueries({ queryKey: ["/api/purchase-requests"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/dashboard/summary"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/cost-centers"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+  };
 
   const transition = useMutation({
     mutationFn: async (payload: Record<string, unknown>) => {
@@ -46,12 +67,21 @@ export default function RequestDetail() {
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/purchase-requests", id] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchase-requests"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/summary"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/cost-centers"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      invalidateAll();
       toast({ title: "Status aktualisiert" });
+    },
+    onError: () => toast({ title: "Aktion fehlgeschlagen", variant: "destructive" }),
+  });
+
+  const decide = useMutation({
+    mutationFn: async (payload: { decision: "approved" | "rejected"; comment: string }) => {
+      const res = await apiRequest("POST", `/api/purchase-requests/${id}/decision`, payload);
+      return res.json();
+    },
+    onSuccess: () => {
+      invalidateAll();
+      setComment("");
+      toast({ title: "Freigabe-Entscheidung gespeichert" });
     },
     onError: () => toast({ title: "Aktion fehlgeschlagen", variant: "destructive" }),
   });
@@ -71,9 +101,16 @@ export default function RequestDetail() {
 
   const supplier = suppliers?.find((s) => s.id === data.supplierId);
   const costCenter = costCenters?.find((c) => c.id === data.costCenterId);
-  const isApprover = user?.role === "approver" || user?.role === "finance";
   const isPurchasing = user?.role === "purchasing" || user?.role === "finance";
-  const canApprove = isApprover && data.status === "pending_approval";
+  const userName = (uid: number | null | undefined) => users?.find((u) => u.id === uid)?.name;
+
+  const steps = data.approvalSteps ?? [];
+  const currentStep = steps.find((s) => s.status === "pending");
+  const canDecide =
+    data.status === "pending_approval" &&
+    !!currentStep &&
+    data.requesterId !== user?.id &&
+    canActOnStep(user?.role, currentStep.approverRole);
   const canOrder = isPurchasing && data.status === "approved";
   const canReceive = isPurchasing && data.status === "ordered";
   const canSubmit = data.status === "draft" && data.requesterId === user?.id;
@@ -169,7 +206,7 @@ export default function RequestDetail() {
         </Card>
       )}
 
-      {(canApprove || canOrder || canReceive || canSubmit) && (
+      {(canDecide || canOrder || canReceive || canSubmit) && (
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">Aktion</CardTitle>
@@ -184,8 +221,11 @@ export default function RequestDetail() {
                 <Send className="h-4 w-4" /> Zur Freigabe einreichen
               </Button>
             )}
-            {canApprove && (
+            {canDecide && currentStep && (
               <>
+                <p className="text-xs text-muted-foreground">
+                  Freigabestufe {currentStep.stepOrder} · {ROLE_LABELS[currentStep.approverRole] ?? currentStep.approverRole}
+                </p>
                 <Textarea
                   placeholder="Kommentar (optional)"
                   value={comment}
@@ -194,16 +234,16 @@ export default function RequestDetail() {
                 />
                 <div className="flex gap-2">
                   <Button
-                    onClick={() => transition.mutate({ status: "approved", approverId: user?.id, approverComment: comment })}
-                    disabled={transition.isPending}
+                    onClick={() => decide.mutate({ decision: "approved", comment })}
+                    disabled={decide.isPending}
                     data-testid="button-approve"
                   >
                     <Check className="h-4 w-4" /> Freigeben
                   </Button>
                   <Button
                     variant="destructive"
-                    onClick={() => transition.mutate({ status: "rejected", approverId: user?.id, approverComment: comment })}
-                    disabled={transition.isPending}
+                    onClick={() => decide.mutate({ decision: "rejected", comment })}
+                    disabled={decide.isPending}
                     data-testid="button-reject"
                   >
                     <X className="h-4 w-4" /> Ablehnen
@@ -232,6 +272,47 @@ export default function RequestDetail() {
                 <PackageCheck className="h-4 w-4" /> Wareneingang bestätigen
               </Button>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {steps.length > 0 && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm">Freigabe-Kette</CardTitle>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <ol className="space-y-3">
+              {steps.map((step) => {
+                const isCurrent = currentStep?.id === step.id;
+                const Icon = step.status === "approved" ? Check : step.status === "rejected" ? X : Clock;
+                const iconClass =
+                  step.status === "approved" ? "text-primary"
+                  : step.status === "rejected" ? "text-destructive"
+                  : "text-muted-foreground";
+                const statusLabel =
+                  step.status === "approved" ? "Freigegeben"
+                  : step.status === "rejected" ? "Abgelehnt"
+                  : isCurrent ? "Offen · aktuelle Stufe" : "Ausstehend";
+                return (
+                  <li key={step.id} className="flex items-start gap-3 text-sm" data-testid={`row-approval-step-${step.stepOrder}`}>
+                    <Icon className={`h-3.5 w-3.5 mt-0.5 shrink-0 ${iconClass}`} />
+                    <div>
+                      <p className="font-medium">
+                        Stufe {step.stepOrder} · {ROLE_LABELS[step.approverRole] ?? step.approverRole}
+                        <span className="text-muted-foreground font-normal"> — {statusLabel}</span>
+                      </p>
+                      {step.decidedById != null && (
+                        <p className="text-muted-foreground text-xs mt-0.5">
+                          {userName(step.decidedById) ?? "Unbekannt"} · {formatDateTime(step.decidedAt)}
+                        </p>
+                      )}
+                      {step.comment && <p className="text-muted-foreground text-xs mt-0.5">{step.comment}</p>}
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
           </CardContent>
         </Card>
       )}

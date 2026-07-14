@@ -25,10 +25,29 @@ const loginLimiter = rateLimit({
   message: { message: "Zu viele Anmeldeversuche. Bitte in ein paar Minuten erneut versuchen." },
 });
 
-// approver/purchasing capabilities are a subset of "finance", mirroring the client-side gates
-// in request-detail.tsx / suppliers.tsx / invoices.tsx.
-const APPROVER_ROLES = ["approver", "finance"] as const;
+// purchasing capabilities are a subset of "finance", mirroring the client-side gates in
+// suppliers.tsx / invoices.tsx. Approver capability is handled per-step via canActOnStep.
 const PURCHASING_ROLES = ["purchasing", "finance"] as const;
+
+// Requests above this net amount require a second (finance) sign-off on top of the
+// regular approver step. Below it, a single approver step is enough.
+const FINANCE_APPROVAL_THRESHOLD = 5000;
+
+// The ordered approval chain for a request of a given amount. Each entry names the role
+// required to satisfy that step; steps are resolved in order (see the decision endpoint).
+function buildApprovalChain(totalAmount: number): { stepOrder: number; approverRole: string }[] {
+  const chain = [{ stepOrder: 1, approverRole: "approver" }];
+  if (totalAmount > FINANCE_APPROVAL_THRESHOLD) {
+    chain.push({ stepOrder: 2, approverRole: "finance" });
+  }
+  return chain;
+}
+
+// finance covers both step kinds; approver covers only approver steps.
+function canActOnStep(userRole: string, stepRole: string): boolean {
+  if (userRole === "finance") return true;
+  return userRole === "approver" && stepRole === "approver";
+}
 
 function genNumber(prefix: string) {
   const year = new Date().getFullYear();
@@ -153,7 +172,8 @@ export async function registerRoutes(
     if (!request) return res.status(404).json({ message: "Bestellanforderung nicht gefunden." });
     const lineItems = await storage.listLineItems(request.id);
     const activity = await storage.listActivity("request", request.id);
-    res.json({ ...request, lineItems, activity });
+    const approvalSteps = await storage.listApprovalSteps(request.id);
+    res.json({ ...request, lineItems, activity, approvalSteps });
   });
 
   app.post("/api/purchase-requests", async (req, res) => {
@@ -179,6 +199,16 @@ export async function registerRoutes(
         if (liParsed.success) await storage.createLineItem(liParsed.data);
       }
     }
+    // Created directly as pending_approval (submit without saving a draft first) → build the
+    // approval chain immediately, same as the draft->submit path in PATCH.
+    if (request.status === "pending_approval") {
+      for (const step of buildApprovalChain(request.totalAmount)) {
+        await storage.createApprovalStep({
+          requestId: request.id, stepOrder: step.stepOrder, approverRole: step.approverRole,
+          status: "pending", comment: "", decidedById: null, decidedAt: null,
+        });
+      }
+    }
     await storage.createActivity({
       entityType: "request", entityId: request.id, actorId: request.requesterId,
       action: request.status === "pending_approval" ? "submitted" : "created",
@@ -198,16 +228,15 @@ export async function registerRoutes(
 
     const actor = req.user!;
     const isOwner = existing.requesterId === actor.id;
-    const isApprover = (APPROVER_ROLES as readonly string[]).includes(actor.role);
     const isPurchasing = (PURCHASING_ROLES as readonly string[]).includes(actor.role);
     const nextStatus = parsed.data.status;
 
-    // Mirrors the transition buttons in client/src/pages/request-detail.tsx — each status
-    // change is only valid from a specific prior status and for a specific role/owner.
+    // Approve/reject are NOT handled here — they run through POST /:id/decision so the
+    // multi-step chain can be resolved. This PATCH only covers submit and the purchasing-side
+    // transitions, plus draft edits (line items / fields by the owner).
     if (nextStatus && nextStatus !== existing.status) {
       const allowed =
         (nextStatus === "pending_approval" && existing.status === "draft" && isOwner) ||
-        (["approved", "rejected"].includes(nextStatus) && existing.status === "pending_approval" && isApprover) ||
         (nextStatus === "ordered" && existing.status === "approved" && isPurchasing) ||
         (nextStatus === "received" && existing.status === "ordered" && isPurchasing);
       if (!allowed) {
@@ -217,13 +246,7 @@ export async function registerRoutes(
       return res.status(403).json({ message: "Für diese Änderung fehlt die Berechtigung." });
     }
 
-    const updates: Record<string, unknown> = { ...parsed.data };
-    if (nextStatus && ["approved", "rejected"].includes(nextStatus)) {
-      updates.approverId = actor.id; // never trust a client-supplied approver
-      if (!existing.decidedAt) updates.decidedAt = new Date().toISOString();
-    }
-
-    const updated = await storage.updatePurchaseRequest(id, updates);
+    const updated = await storage.updatePurchaseRequest(id, parsed.data);
 
     if (Array.isArray(lineItems)) {
       await storage.deleteLineItemsForRequest(id);
@@ -234,16 +257,21 @@ export async function registerRoutes(
     }
 
     if (nextStatus && nextStatus !== existing.status) {
+      // On submit, build the approval chain (length depends on the amount).
+      if (nextStatus === "pending_approval" && updated) {
+        for (const step of buildApprovalChain(updated.totalAmount)) {
+          await storage.createApprovalStep({
+            requestId: id, stepOrder: step.stepOrder, approverRole: step.approverRole,
+            status: "pending", comment: "", decidedById: null, decidedAt: null,
+          });
+        }
+      }
+
       await storage.createActivity({
         entityType: "request", entityId: id, actorId: actor.id,
-        action: nextStatus, note: activityNote ?? parsed.data.approverComment ?? "",
-        createdAt: new Date().toISOString(),
+        action: nextStatus === "pending_approval" ? "submitted" : nextStatus,
+        note: activityNote ?? "", createdAt: new Date().toISOString(),
       });
-
-      // On approval, bump the cost center's spent amount.
-      if (nextStatus === "approved" && updated) {
-        await storage.updateCostCenterSpent(updated.costCenterId, updated.totalAmount);
-      }
 
       // On "ordered", auto-create a purchase order.
       if (nextStatus === "ordered" && updated && updated.supplierId) {
@@ -260,6 +288,70 @@ export async function registerRoutes(
     }
 
     res.json(updated);
+  });
+
+  // Resolve one step of a request's approval chain. The acting user decides the current
+  // (lowest-order still-pending) step; the request is finalized only once the last step
+  // is approved, or immediately rejected if any step is rejected.
+  app.post("/api/purchase-requests/:id/decision", async (req, res) => {
+    const id = Number(req.params.id);
+    const decision = req.body?.decision;
+    const comment = typeof req.body?.comment === "string" ? req.body.comment : "";
+    if (decision !== "approved" && decision !== "rejected") {
+      return res.status(400).json({ message: "Ungültige Entscheidung." });
+    }
+
+    const request = await storage.getPurchaseRequest(id);
+    if (!request) return res.status(404).json({ message: "Bestellanforderung nicht gefunden." });
+    if (request.status !== "pending_approval") {
+      return res.status(409).json({ message: "Diese Anforderung wartet nicht auf eine Freigabe." });
+    }
+
+    const actor = req.user!;
+    // Segregation of duties: you cannot decide on your own request.
+    if (request.requesterId === actor.id) {
+      return res.status(403).json({ message: "Die eigene Anforderung kann nicht selbst freigegeben werden." });
+    }
+
+    const steps = await storage.listApprovalSteps(id);
+    const currentStep = steps.find((s) => s.status === "pending");
+    if (!currentStep) {
+      return res.status(409).json({ message: "Keine offene Freigabestufe vorhanden." });
+    }
+    if (!canActOnStep(actor.role, currentStep.approverRole)) {
+      return res.status(403).json({ message: "Für diese Freigabestufe fehlt die Berechtigung." });
+    }
+
+    const now = new Date().toISOString();
+    await storage.updateApprovalStep(currentStep.id, {
+      status: decision, decidedById: actor.id, comment, decidedAt: now,
+    });
+
+    const remaining = steps.filter((s) => s.status === "pending" && s.id !== currentStep.id);
+    let updated;
+    if (decision === "rejected") {
+      updated = await storage.updatePurchaseRequest(id, {
+        status: "rejected", approverId: actor.id, approverComment: comment, decidedAt: now,
+      });
+    } else if (remaining.length === 0) {
+      // Last step approved → request is fully approved.
+      updated = await storage.updatePurchaseRequest(id, {
+        status: "approved", approverId: actor.id, approverComment: comment, decidedAt: now,
+      });
+      if (updated) await storage.updateCostCenterSpent(updated.costCenterId, updated.totalAmount);
+    } else {
+      // More steps remain — record the interim approval but keep the request pending.
+      updated = await storage.updatePurchaseRequest(id, { approverComment: comment });
+    }
+
+    await storage.createActivity({
+      entityType: "request", entityId: id, actorId: actor.id,
+      action: decision === "rejected" ? "rejected" : remaining.length === 0 ? "approved" : "step_approved",
+      note: comment, createdAt: now,
+    });
+
+    const approvalSteps = await storage.listApprovalSteps(id);
+    res.json({ ...updated, approvalSteps });
   });
 
   // ---------- Purchase orders ----------

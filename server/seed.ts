@@ -136,6 +136,16 @@ export async function seedIfEmpty() {
   });
   await storage.createLineItem({ requestId: r6.id, description: "Kopierpapier A4 80g (Palette)", quantity: 1, unitPrice: 340.0 });
 
+  // Approval chains matching each request's state. r1 (8.250 €) is over the finance
+  // threshold, so it has a two-step chain (both still pending); the rest are single-step.
+  // r6 is a draft and has no chain yet (built on submit).
+  await storage.createApprovalStep({ requestId: r1.id, stepOrder: 1, approverRole: "approver", status: "pending", comment: "", decidedById: null, decidedAt: null });
+  await storage.createApprovalStep({ requestId: r1.id, stepOrder: 2, approverRole: "finance", status: "pending", comment: "", decidedById: null, decidedAt: null });
+  await storage.createApprovalStep({ requestId: r2.id, stepOrder: 1, approverRole: "approver", status: "rejected", comment: "Bitte Angebot erneuern lassen, Lieferant aktuell inaktiv gelistet.", decidedById: admin.id, decidedAt: daysAgo(7) });
+  await storage.createApprovalStep({ requestId: r3.id, stepOrder: 1, approverRole: "approver", status: "approved", comment: "Freigegeben, Budget deckt Bestellung.", decidedById: approver1.id, decidedAt: daysAgo(12) });
+  await storage.createApprovalStep({ requestId: r4.id, stepOrder: 1, approverRole: "approver", status: "approved", comment: "Dringend, bitte sofort bestellen.", decidedById: admin.id, decidedAt: daysAgo(21) });
+  await storage.createApprovalStep({ requestId: r5.id, stepOrder: 1, approverRole: "approver", status: "approved", comment: "Freigegeben.", decidedById: admin.id, decidedAt: daysAgo(33) });
+
   // Purchase orders for the "ordered"/"received" requests
   const o1 = await storage.createPurchaseOrder({
     orderNumber: "PO-2026-0114", requestId: r4.id, supplierId: supIT.id, status: "open",

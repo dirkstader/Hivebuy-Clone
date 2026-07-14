@@ -75,7 +75,11 @@ app.use((req, res, next) => {
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+        // Never log session tokens — this line goes to stdout and is often collected.
+        const safeBody = capturedJsonResponse.token
+          ? { ...capturedJsonResponse, token: "[redacted]" }
+          : capturedJsonResponse;
+        logLine += ` :: ${JSON.stringify(safeBody)}`;
       }
 
       log(logLine);

@@ -1,13 +1,13 @@
 import {
   users, costCenters, suppliers, catalogItems, purchaseRequests, requestLineItems,
-  purchaseOrders, invoices, activityLog, punchoutSessions,
+  purchaseOrders, invoices, activityLog, punchoutSessions, approvalSteps,
 } from '@shared/schema';
 import type {
   User, InsertUser, CostCenter, InsertCostCenter, Supplier, InsertSupplier,
   CatalogItem, InsertCatalogItem, PurchaseRequest, InsertPurchaseRequest,
   RequestLineItem, InsertRequestLineItem, PurchaseOrder, InsertPurchaseOrder,
   Invoice, InsertInvoice, ActivityLog, InsertActivityLog,
-  PunchoutSession, InsertPunchoutSession,
+  PunchoutSession, InsertPunchoutSession, ApprovalStep, InsertApprovalStep,
 } from '@shared/schema';
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
@@ -74,6 +74,11 @@ export interface IStorage {
   getInvoice(id: number): Promise<Invoice | undefined>;
   createInvoice(i: InsertInvoice): Promise<Invoice>;
   updateInvoice(id: number, i: Partial<InsertInvoice>): Promise<Invoice | undefined>;
+
+  // Approval steps
+  listApprovalSteps(requestId: number): Promise<ApprovalStep[]>;
+  createApprovalStep(s: InsertApprovalStep): Promise<ApprovalStep>;
+  updateApprovalStep(id: number, s: Partial<InsertApprovalStep>): Promise<ApprovalStep | undefined>;
 
   // Activity log
   listActivity(entityType: string, entityId: number): Promise<ActivityLog[]>;
@@ -145,6 +150,17 @@ export class DatabaseStorage implements IStorage {
   async createInvoice(i: InsertInvoice) { return db.insert(invoices).values(i).returning().get(); }
   async updateInvoice(id: number, i: Partial<InsertInvoice>) {
     return db.update(invoices).set(i).where(eq(invoices.id, id)).returning().get();
+  }
+
+  async listApprovalSteps(requestId: number) {
+    return db.select().from(approvalSteps)
+      .where(eq(approvalSteps.requestId, requestId))
+      .orderBy(approvalSteps.stepOrder)
+      .all();
+  }
+  async createApprovalStep(s: InsertApprovalStep) { return db.insert(approvalSteps).values(s).returning().get(); }
+  async updateApprovalStep(id: number, s: Partial<InsertApprovalStep>) {
+    return db.update(approvalSteps).set(s).where(eq(approvalSteps.id, id)).returning().get();
   }
 
   async listActivity(entityType: string, entityId: number) {

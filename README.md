@@ -71,6 +71,7 @@ Alle Demo-Konten verwenden das Passwort `demo1234`:
 | `npm run build`     | Erstellt den Produktions-Build (Client + Server)        |
 | `npm start`         | Startet den gebauten Produktionsserver (`dist/index.cjs`) |
 | `npm run check`     | TypeScript-Typprüfung                                   |
+| `npm test`          | Führt die Vitest-Testsuite aus (Auth, Freigabe-Workflow, Rechnungsabgleich) |
 | `npm run db:generate` | Erzeugt eine neue Migration aus Änderungen an `shared/schema.ts` |
 
 Migrationen liegen versioniert in `migrations/` und werden beim Start automatisch angewendet (kein manueller Schritt nötig).
