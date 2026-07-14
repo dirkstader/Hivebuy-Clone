@@ -68,6 +68,7 @@ export default function RequestDetail() {
     queryClient.invalidateQueries({ queryKey: ["/api/dashboard/summary"] });
     queryClient.invalidateQueries({ queryKey: ["/api/cost-centers"] });
     queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/notifications"] });
   };
 
   const transition = useMutation({

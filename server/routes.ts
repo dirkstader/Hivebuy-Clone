@@ -640,5 +640,71 @@ export async function registerRoutes(
     res.json({ spendByCostCenter, spendBySupplier, spendByMonth, requestsByStatus });
   });
 
+  // ---------- Notifications ----------
+  // A derived, role-aware "what needs my attention" list (no persistence, no email — the
+  // target runtime has no mailer). Computed live from request state, approval steps and the
+  // activity log for the current user.
+  app.get("/api/notifications", async (req, res) => {
+    const actor = req.user!;
+    const isPurchasing = (PURCHASING_ROLES as readonly string[]).includes(actor.role);
+    const requests = await storage.listPurchaseRequests();
+    const notifications: {
+      id: string; type: string; title: string; description: string; href: string; createdAt: string;
+    }[] = [];
+
+    for (const r of requests) {
+      // Approvals awaiting me: the current pending step is one my role can act on, and it is
+      // not my own request (segregation of duties).
+      if (r.status === "pending_approval" && r.requesterId !== actor.id) {
+        const steps = await storage.listApprovalSteps(r.id);
+        const current = steps.find((s) => s.status === "pending");
+        if (current && canActOnStep(actor.role, current.approverRole)) {
+          notifications.push({
+            id: `approval-${r.id}`, type: "approval",
+            title: "Freigabe erforderlich",
+            description: `${r.requestNumber} · ${r.title}`,
+            href: `/requests/${r.id}`, createdAt: r.createdAt,
+          });
+        }
+      }
+
+      // My requests that were decided.
+      if (r.requesterId === actor.id && (r.status === "approved" || r.status === "rejected") && r.decidedAt) {
+        notifications.push({
+          id: `decision-${r.id}`, type: r.status === "approved" ? "approved" : "rejected",
+          title: r.status === "approved" ? "Anforderung freigegeben" : "Anforderung abgelehnt",
+          description: `${r.requestNumber} · ${r.title}`,
+          href: `/requests/${r.id}`, createdAt: r.decidedAt,
+        });
+      }
+
+      // Purchasing/finance: approved requests waiting to be ordered.
+      if (isPurchasing && r.status === "approved") {
+        notifications.push({
+          id: `order-${r.id}`, type: "order",
+          title: "Bereit zur Bestellung",
+          description: `${r.requestNumber} · ${r.title}`,
+          href: `/requests/${r.id}`, createdAt: r.decidedAt ?? r.createdAt,
+        });
+      }
+    }
+
+    // Purchasing/finance: invoices flagged as a discrepancy.
+    if (isPurchasing) {
+      const invoices = await storage.listInvoices();
+      for (const inv of invoices.filter((i) => i.status === "discrepancy")) {
+        notifications.push({
+          id: `invoice-${inv.id}`, type: "discrepancy",
+          title: "Rechnungsabweichung",
+          description: `${inv.invoiceNumber} · ${inv.matchNote}`,
+          href: `/invoices`, createdAt: inv.receivedAt,
+        });
+      }
+    }
+
+    notifications.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    res.json(notifications);
+  });
+
   return httpServer;
 }

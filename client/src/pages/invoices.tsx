@@ -53,6 +53,8 @@ export default function Invoices() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/invoices"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/cost-centers"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/notifications"] });
       toast({ title: "Rechnung erfasst und abgeglichen" });
       setDialogOpen(false);
       form.reset();

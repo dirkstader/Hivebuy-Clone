@@ -7,6 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { NotificationBell } from "@/components/notification-bell";
 import { AuthProvider, useAuth } from "@/lib/auth-context";
 import { ThemeProvider } from "@/lib/theme-context";
 import Login from "@/pages/login";
@@ -52,7 +53,10 @@ function AuthenticatedShell() {
           <div className="flex flex-col flex-1 min-w-0">
             <header className="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
               <SidebarTrigger data-testid="button-sidebar-toggle" />
-              <ThemeToggle />
+              <div className="flex items-center gap-1">
+                <NotificationBell />
+                <ThemeToggle />
+              </div>
             </header>
             <main className="flex-1 overflow-y-auto">
               <AppRouter />
