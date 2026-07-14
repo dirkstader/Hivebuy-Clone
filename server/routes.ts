@@ -358,11 +358,18 @@ export async function registerRoutes(
         status: "rejected", approverId: actor.id, approverComment: comment, decidedAt: now,
       });
     } else if (remaining.length === 0) {
-      // Last step approved → request is fully approved.
+      // Last step approved → request is fully approved. Reserve the budget as a commitment
+      // (Obligo) rather than counting it as spent — actual spend is booked when invoiced.
       updated = await storage.updatePurchaseRequest(id, {
         status: "approved", approverId: actor.id, approverComment: comment, decidedAt: now,
       });
-      if (updated) await storage.updateCostCenterSpent(updated.costCenterId, updated.totalAmount);
+      if (updated) {
+        await storage.createBudgetCommitment({
+          costCenterId: updated.costCenterId, requestId: updated.id, amount: updated.totalAmount,
+          status: "reserved", createdAt: now, resolvedAt: null,
+        });
+        await storage.updateCostCenterCommitted(updated.costCenterId, updated.totalAmount);
+      }
     } else {
       // More steps remain — record the interim approval but keep the request pending.
       updated = await storage.updatePurchaseRequest(id, { approverComment: comment });
@@ -504,6 +511,18 @@ export async function registerRoutes(
     }
 
     const invoice = await storage.createInvoice({ ...parsed.data, amount, status, matchNote });
+
+    // Realize the budget: release the request's reservation (Obligo) and book the invoiced
+    // amount as actual spend. Only the first invoice per order clears the reservation.
+    if (order) {
+      const commitment = await storage.getReservedCommitmentByRequest(order.requestId);
+      if (commitment) {
+        await storage.updateBudgetCommitment(commitment.id, { status: "realized", resolvedAt: new Date().toISOString() });
+        await storage.updateCostCenterCommitted(commitment.costCenterId, -commitment.amount);
+        await storage.updateCostCenterSpent(commitment.costCenterId, amount);
+      }
+    }
+
     res.status(201).json(invoice);
   });
 
@@ -571,6 +590,7 @@ export async function registerRoutes(
       openOrders: orders.filter(o => o.status === "open" || o.status === "partially_received").length,
       discrepancyInvoices: invoices.filter(i => i.status === "discrepancy").length,
       totalSpent: costCenters.reduce((s, c) => s + c.spent, 0),
+      totalCommitted: costCenters.reduce((s, c) => s + c.committed, 0),
       totalBudget: costCenters.reduce((s, c) => s + c.annualBudget, 0),
       activeSuppliers: suppliers.filter(s => s.status === "active").length,
       requestsByStatus: requests.reduce((acc: Record<string, number>, r) => {

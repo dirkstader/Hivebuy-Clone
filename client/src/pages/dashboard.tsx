@@ -14,6 +14,7 @@ interface DashboardSummary {
   openOrders: number;
   discrepancyInvoices: number;
   totalSpent: number;
+  totalCommitted: number;
   totalBudget: number;
   activeSuppliers: number;
   requestsByStatus: Record<string, number>;
@@ -40,7 +41,7 @@ export default function Dashboard() {
   const { user } = useAuth();
   const { data, isLoading } = useQuery<DashboardSummary>({ queryKey: ["/api/dashboard/summary"] });
 
-  const budgetPct = data && data.totalBudget > 0 ? Math.min(100, Math.round((data.totalSpent / data.totalBudget) * 100)) : 0;
+  const budgetPct = data && data.totalBudget > 0 ? Math.min(100, Math.round(((data.totalSpent + data.totalCommitted) / data.totalBudget) * 100)) : 0;
 
   return (
     <div className="p-4 sm:p-6 space-y-6 max-w-6xl">
@@ -81,7 +82,9 @@ export default function Dashboard() {
                   <span className="text-sm text-muted-foreground font-normal"> / {formatCurrency(data?.totalBudget ?? 0)}</span>
                 </p>
                 <Progress value={budgetPct} className="h-2" data-testid="progress-budget" />
-                <p className="text-xs text-muted-foreground">{budgetPct}% des Jahresbudgets verbraucht</p>
+                <p className="text-xs text-muted-foreground">
+                  {budgetPct}% gebunden · {formatCurrency(data?.totalCommitted ?? 0)} reserviert
+                </p>
               </>
             )}
           </CardContent>

@@ -173,9 +173,15 @@ export async function seedIfEmpty() {
     matchNote: "Abweichung im 3-Way-Match: bestellt 1.780,00 € · geliefert 0,00 € · berechnet 1.830,00 € (Wareneingang unvollständig).",
   });
 
-  // Update cost center spent totals from approved/ordered/received requests
-  await storage.updateCostCenterSpent(ccFiliale1.id, 2808.0);
-  await storage.updateCostCenterSpent(ccIT.id, 1780.0 + 1674.0);
+  // Budget: approved-but-not-invoiced requests reserve budget (Obligo); invoiced ones are
+  // realized as actual spend. r3 (approved) and r4 (ordered, invoice still in discrepancy)
+  // stay reserved; r5 (received, matched invoice) is realized.
+  await storage.createBudgetCommitment({ costCenterId: ccFiliale1.id, requestId: r3.id, amount: 2808.0, status: "reserved", createdAt: daysAgo(12), resolvedAt: null });
+  await storage.updateCostCenterCommitted(ccFiliale1.id, 2808.0);
+  await storage.createBudgetCommitment({ costCenterId: ccIT.id, requestId: r4.id, amount: 1780.0, status: "reserved", createdAt: daysAgo(21), resolvedAt: null });
+  await storage.updateCostCenterCommitted(ccIT.id, 1780.0);
+  await storage.createBudgetCommitment({ costCenterId: ccIT.id, requestId: r5.id, amount: 1674.0, status: "realized", createdAt: daysAgo(33), resolvedAt: daysAgo(24) });
+  await storage.updateCostCenterSpent(ccIT.id, 1674.0);
 
   // Activity log
   await storage.createActivity({ entityType: "request", entityId: r3.id, actorId: approver1.id, action: "approved", note: "Freigegeben, Budget deckt Bestellung.", createdAt: daysAgo(12) });

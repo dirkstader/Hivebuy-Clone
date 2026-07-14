@@ -1,7 +1,7 @@
 import {
   users, costCenters, suppliers, catalogItems, purchaseRequests, requestLineItems,
   purchaseOrders, invoices, activityLog, punchoutSessions, approvalSteps,
-  goodsReceipts, goodsReceiptLines,
+  goodsReceipts, goodsReceiptLines, budgetCommitments,
 } from '@shared/schema';
 import type {
   User, InsertUser, CostCenter, InsertCostCenter, Supplier, InsertSupplier,
@@ -10,7 +10,9 @@ import type {
   Invoice, InsertInvoice, ActivityLog, InsertActivityLog,
   PunchoutSession, InsertPunchoutSession, ApprovalStep, InsertApprovalStep,
   GoodsReceipt, InsertGoodsReceipt, GoodsReceiptLine, InsertGoodsReceiptLine,
+  BudgetCommitment, InsertBudgetCommitment,
 } from '@shared/schema';
+import { and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import Database from "better-sqlite3";
@@ -39,6 +41,7 @@ export interface IStorage {
   getCostCenter(id: number): Promise<CostCenter | undefined>;
   createCostCenter(cc: InsertCostCenter): Promise<CostCenter>;
   updateCostCenterSpent(id: number, delta: number): Promise<void>;
+  updateCostCenterCommitted(id: number, delta: number): Promise<void>;
   deleteCostCenter(id: number): Promise<void>;
 
   // Suppliers
@@ -82,6 +85,11 @@ export interface IStorage {
   createApprovalStep(s: InsertApprovalStep): Promise<ApprovalStep>;
   updateApprovalStep(id: number, s: Partial<InsertApprovalStep>): Promise<ApprovalStep | undefined>;
 
+  // Budget commitments (Obligo)
+  createBudgetCommitment(c: InsertBudgetCommitment): Promise<BudgetCommitment>;
+  getReservedCommitmentByRequest(requestId: number): Promise<BudgetCommitment | undefined>;
+  updateBudgetCommitment(id: number, c: Partial<InsertBudgetCommitment>): Promise<BudgetCommitment | undefined>;
+
   // Goods receipts
   createGoodsReceipt(r: InsertGoodsReceipt): Promise<GoodsReceipt>;
   createGoodsReceiptLine(l: InsertGoodsReceiptLine): Promise<GoodsReceiptLine>;
@@ -116,7 +124,22 @@ export class DatabaseStorage implements IStorage {
     if (!cc) return;
     db.update(costCenters).set({ spent: cc.spent + delta }).where(eq(costCenters.id, id)).run();
   }
+  async updateCostCenterCommitted(id: number, delta: number) {
+    const cc = await this.getCostCenter(id);
+    if (!cc) return;
+    db.update(costCenters).set({ committed: Math.max(0, cc.committed + delta) }).where(eq(costCenters.id, id)).run();
+  }
   async deleteCostCenter(id: number) { db.delete(costCenters).where(eq(costCenters.id, id)).run(); }
+
+  async createBudgetCommitment(c: InsertBudgetCommitment) { return db.insert(budgetCommitments).values(c).returning().get(); }
+  async getReservedCommitmentByRequest(requestId: number) {
+    return db.select().from(budgetCommitments)
+      .where(and(eq(budgetCommitments.requestId, requestId), eq(budgetCommitments.status, "reserved")))
+      .get();
+  }
+  async updateBudgetCommitment(id: number, c: Partial<InsertBudgetCommitment>) {
+    return db.update(budgetCommitments).set(c).where(eq(budgetCommitments.id, id)).returning().get();
+  }
 
   async listSuppliers() { return db.select().from(suppliers).all(); }
   async getSupplier(id: number) { return db.select().from(suppliers).where(eq(suppliers.id, id)).get(); }

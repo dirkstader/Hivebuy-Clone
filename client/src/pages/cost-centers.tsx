@@ -22,8 +22,9 @@ export default function CostCenters() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {(costCenters ?? []).map((c) => {
-            const pct = c.annualBudget > 0 ? Math.min(100, (c.spent / c.annualBudget) * 100) : 0;
-            const over = c.spent > c.annualBudget;
+            const used = c.spent + c.committed;
+            const pct = c.annualBudget > 0 ? Math.min(100, (used / c.annualBudget) * 100) : 0;
+            const over = used > c.annualBudget;
             return (
               <Card key={c.id} data-testid={`card-cost-center-${c.id}`}>
                 <CardContent className="p-4 space-y-3">
@@ -38,7 +39,9 @@ export default function CostCenters() {
                   </div>
                   <Progress value={pct} className={over ? "[&>div]:bg-destructive" : ""} />
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>{formatCurrency(c.spent)} verbraucht</span>
+                    <span data-testid={`text-cc-usage-${c.id}`}>
+                      {formatCurrency(c.spent)} verbraucht · {formatCurrency(c.committed)} reserviert
+                    </span>
                     <span>Budget {formatCurrency(c.annualBudget)}</span>
                   </div>
                 </CardContent>

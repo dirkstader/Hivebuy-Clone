@@ -29,6 +29,8 @@ export const costCenters = sqliteTable("cost_centers", {
   city: text("city").notNull().default(""),
   annualBudget: real("annual_budget").notNull().default(0),
   spent: real("spent").notNull().default(0),
+  // Reserved-but-not-yet-invoiced amount (Obligo): rises on approval, released on invoicing.
+  committed: real("committed").notNull().default(0),
 });
 
 export const insertCostCenterSchema = createInsertSchema(costCenters).omit({ id: true });
@@ -182,6 +184,27 @@ export interface PunchoutCartLine {
   unitPrice: number;
   imageUrl?: string;
 }
+
+// ---------- Budget Commitments (Obligo ledger) ----------
+// Each fully approved request reserves budget on its cost center (status reserved). Booking
+// an invoice realizes the reservation (status realized); a future cancel path would release
+// it. The cost center's committed column is the denormalized sum of reserved amounts.
+export const COMMITMENT_STATUSES = ["reserved", "realized", "released"] as const;
+export type CommitmentStatus = (typeof COMMITMENT_STATUSES)[number];
+
+export const budgetCommitments = sqliteTable("budget_commitments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  costCenterId: integer("cost_center_id").notNull(),
+  requestId: integer("request_id").notNull(),
+  amount: real("amount").notNull().default(0),
+  status: text("status").notNull().default("reserved"),
+  createdAt: text("created_at").notNull(),
+  resolvedAt: text("resolved_at"),
+});
+
+export const insertBudgetCommitmentSchema = createInsertSchema(budgetCommitments).omit({ id: true });
+export type InsertBudgetCommitment = z.infer<typeof insertBudgetCommitmentSchema>;
+export type BudgetCommitment = typeof budgetCommitments.$inferSelect;
 
 // ---------- Goods Receipts (Wareneingang) for the 3-way match ----------
 // A purchase order is received in one or more goods receipts. Each receipt line records the
