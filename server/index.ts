@@ -1,6 +1,8 @@
 import "dotenv/config";
 import express, { Response, NextFunction } from 'express';
 import type { Request } from 'express';
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "node:http";
@@ -14,15 +16,37 @@ declare module "http" {
   }
 }
 
+// contentSecurityPolicy and frameguard are disabled: the README requires this app to stay
+// embeddable in an iframe from any host origin (hash-routing exists for the same reason),
+// and a default CSP would also break Vite's dev-mode HMR script injection.
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    frameguard: false,
+  }),
+);
+
 app.use(
   express.json({
+    limit: "512kb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
   }),
 );
 
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: false, limit: "512kb" }));
+
+// Coarse per-IP abuse guard for the whole API; login gets its own stricter limiter in routes.ts.
+app.use(
+  "/api",
+  rateLimit({
+    windowMs: 60 * 1000,
+    limit: 300,
+    standardHeaders: true,
+    legacyHeaders: false,
+  }),
+);
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
@@ -66,7 +90,12 @@ app.use((req, res, next) => {
 
   app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
+    // Never leak internal error details for unexpected 5xx in production — only the
+    // message from intentional client errors (4xx) or local dev is safe to forward.
+    const message =
+      status < 500 || process.env.NODE_ENV !== "production"
+        ? err.message || "Internal Server Error"
+        : "Internal Server Error";
 
     console.error("Internal Server Error:", err);
 
@@ -91,15 +120,8 @@ app.use((req, res, next) => {
   // Other ports are firewalled. Default to 5000 if not specified.
   // this serves both the API and the client.
   // It is the only port that is not firewalled.
-  const port = parseInt(process.env.PORT || "5000", 10);
-  httpServer.listen(
-    {
-      port,
-      host: "0.0.0.0",
-      reusePort: true,
-    },
-    () => {
-      log(`serving on port ${port}`);
-    },
-  );
+  const port = parseInt(process.env.PORT || "5001", 10);
+  httpServer.listen(port, "0.0.0.0", () => {
+    log(`serving on port ${port}`);
+  });
 })();

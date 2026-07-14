@@ -1,14 +1,34 @@
 import type { Express } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
+import { z } from "zod";
+import rateLimit from "express-rate-limit";
 import { storage } from "./storage";
 import { seedIfEmpty } from "./seed";
 import { AMAZON_CATALOG } from "./amazon-catalog";
+import { verifyPassword } from "./password";
+import { createSession, destroySession, requireAuth, requireRole, sanitizeUser } from "./auth";
 import {
   insertUserSchema, insertCostCenterSchema, insertSupplierSchema, insertCatalogItemSchema,
   insertPurchaseRequestSchema, insertRequestLineItemSchema, insertPurchaseOrderSchema, insertInvoiceSchema,
   insertPunchoutSessionSchema,
 } from "@shared/schema";
+
+const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
+
+// Brute-force guard: 10 attempts per IP per 15 minutes, regardless of outcome.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Zu viele Anmeldeversuche. Bitte in ein paar Minuten erneut versuchen." },
+});
+
+// approver/purchasing capabilities are a subset of "finance", mirroring the client-side gates
+// in request-detail.tsx / suppliers.tsx / invoices.tsx.
+const APPROVER_ROLES = ["approver", "finance"] as const;
+const PURCHASING_ROLES = ["purchasing", "finance"] as const;
 
 function genNumber(prefix: string) {
   const year = new Date().getFullYear();
@@ -22,33 +42,51 @@ export async function registerRoutes(
 ): Promise<Server> {
   await seedIfEmpty();
 
-  // ---------- Auth (simple, no sessions — client stores current user in memory) ----------
-  app.post("/api/auth/login", async (req, res) => {
-    const { email, password } = req.body ?? {};
-    const user = await storage.getUserByEmail(String(email ?? "").toLowerCase());
-    if (!user || user.password !== password) {
+  // ---------- Auth ----------
+  // Bearer tokens kept in-memory server-side (see server/auth.ts) — no cookies, matching the
+  // client's in-memory-only auth state. Login and the user list must stay public: the login
+  // page needs the user list before any token exists.
+  app.post("/api/auth/login", loginLimiter, async (req, res) => {
+    const parsed = loginSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: "E-Mail oder Passwort ist falsch." });
+    const user = await storage.getUserByEmail(parsed.data.email.toLowerCase());
+    if (!user || !(await verifyPassword(parsed.data.password, user.password))) {
       return res.status(401).json({ message: "E-Mail oder Passwort ist falsch." });
     }
-    res.json(user);
+    const token = createSession(user.id);
+    res.json({ user: sanitizeUser(user), token });
+  });
+
+  app.post("/api/auth/logout", requireAuth, async (req, res) => {
+    const header = req.headers.authorization ?? "";
+    destroySession(header.slice("Bearer ".length));
+    res.status(204).end();
+  });
+
+  app.get("/api/auth/me", requireAuth, async (req, res) => {
+    res.json(sanitizeUser(req.user!));
   });
 
   app.get("/api/users", async (_req, res) => {
-    res.json(await storage.listUsers());
+    res.json((await storage.listUsers()).map(sanitizeUser));
   });
 
-  app.post("/api/users", async (req, res) => {
+  app.post("/api/users", requireAuth, requireRole("finance"), async (req, res) => {
     const parsed = insertUserSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
     const user = await storage.createUser(parsed.data);
-    res.status(201).json(user);
+    res.status(201).json(sanitizeUser(user));
   });
+
+  // ---------- Everything below requires a valid session ----------
+  app.use("/api", requireAuth);
 
   // ---------- Cost centers ----------
   app.get("/api/cost-centers", async (_req, res) => {
     res.json(await storage.listCostCenters());
   });
 
-  app.post("/api/cost-centers", async (req, res) => {
+  app.post("/api/cost-centers", requireRole("finance"), async (req, res) => {
     const parsed = insertCostCenterSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
     res.status(201).json(await storage.createCostCenter(parsed.data));
@@ -66,13 +104,13 @@ export async function registerRoutes(
     res.json({ ...supplier, catalogItems: items });
   });
 
-  app.post("/api/suppliers", async (req, res) => {
+  app.post("/api/suppliers", requireRole(...PURCHASING_ROLES), async (req, res) => {
     const parsed = insertSupplierSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
     res.status(201).json(await storage.createSupplier(parsed.data));
   });
 
-  app.patch("/api/suppliers/:id", async (req, res) => {
+  app.patch("/api/suppliers/:id", requireRole(...PURCHASING_ROLES), async (req, res) => {
     const parsed = insertSupplierSchema.partial().safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
     const updated = await storage.updateSupplier(Number(req.params.id), parsed.data);
@@ -80,7 +118,7 @@ export async function registerRoutes(
     res.json(updated);
   });
 
-  app.delete("/api/suppliers/:id", async (req, res) => {
+  app.delete("/api/suppliers/:id", requireRole(...PURCHASING_ROLES), async (req, res) => {
     await storage.deleteSupplier(Number(req.params.id));
     res.status(204).end();
   });
@@ -90,13 +128,13 @@ export async function registerRoutes(
     res.json(await storage.listCatalogItems());
   });
 
-  app.post("/api/catalog-items", async (req, res) => {
+  app.post("/api/catalog-items", requireRole(...PURCHASING_ROLES), async (req, res) => {
     const parsed = insertCatalogItemSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
     res.status(201).json(await storage.createCatalogItem(parsed.data));
   });
 
-  app.delete("/api/catalog-items/:id", async (req, res) => {
+  app.delete("/api/catalog-items/:id", requireRole(...PURCHASING_ROLES), async (req, res) => {
     await storage.deleteCatalogItem(Number(req.params.id));
     res.status(204).end();
   });
@@ -122,6 +160,7 @@ export async function registerRoutes(
     const { lineItems, ...body } = req.body ?? {};
     const parsed = insertPurchaseRequestSchema.safeParse({
       ...body,
+      requesterId: req.user!.id, // never trust a client-supplied requester
       requestNumber: body.requestNumber || genNumber("BA"),
       createdAt: new Date().toISOString(),
       status: body.status || "draft",
@@ -157,9 +196,31 @@ export async function registerRoutes(
     const existing = await storage.getPurchaseRequest(id);
     if (!existing) return res.status(404).json({ message: "Bestellanforderung nicht gefunden." });
 
+    const actor = req.user!;
+    const isOwner = existing.requesterId === actor.id;
+    const isApprover = (APPROVER_ROLES as readonly string[]).includes(actor.role);
+    const isPurchasing = (PURCHASING_ROLES as readonly string[]).includes(actor.role);
+    const nextStatus = parsed.data.status;
+
+    // Mirrors the transition buttons in client/src/pages/request-detail.tsx — each status
+    // change is only valid from a specific prior status and for a specific role/owner.
+    if (nextStatus && nextStatus !== existing.status) {
+      const allowed =
+        (nextStatus === "pending_approval" && existing.status === "draft" && isOwner) ||
+        (["approved", "rejected"].includes(nextStatus) && existing.status === "pending_approval" && isApprover) ||
+        (nextStatus === "ordered" && existing.status === "approved" && isPurchasing) ||
+        (nextStatus === "received" && existing.status === "ordered" && isPurchasing);
+      if (!allowed) {
+        return res.status(403).json({ message: "Für diesen Statuswechsel fehlt die Berechtigung." });
+      }
+    } else if (!isOwner && !isPurchasing) {
+      return res.status(403).json({ message: "Für diese Änderung fehlt die Berechtigung." });
+    }
+
     const updates: Record<string, unknown> = { ...parsed.data };
-    if (parsed.data.status && ["approved", "rejected"].includes(parsed.data.status) && !existing.decidedAt) {
-      updates.decidedAt = new Date().toISOString();
+    if (nextStatus && ["approved", "rejected"].includes(nextStatus)) {
+      updates.approverId = actor.id; // never trust a client-supplied approver
+      if (!existing.decidedAt) updates.decidedAt = new Date().toISOString();
     }
 
     const updated = await storage.updatePurchaseRequest(id, updates);
@@ -172,20 +233,20 @@ export async function registerRoutes(
       }
     }
 
-    if (parsed.data.status && parsed.data.status !== existing.status) {
+    if (nextStatus && nextStatus !== existing.status) {
       await storage.createActivity({
-        entityType: "request", entityId: id, actorId: parsed.data.approverId ?? existing.requesterId,
-        action: parsed.data.status, note: activityNote ?? parsed.data.approverComment ?? "",
+        entityType: "request", entityId: id, actorId: actor.id,
+        action: nextStatus, note: activityNote ?? parsed.data.approverComment ?? "",
         createdAt: new Date().toISOString(),
       });
 
       // On approval, bump the cost center's spent amount.
-      if (parsed.data.status === "approved" && updated) {
+      if (nextStatus === "approved" && updated) {
         await storage.updateCostCenterSpent(updated.costCenterId, updated.totalAmount);
       }
 
       // On "ordered", auto-create a purchase order.
-      if (parsed.data.status === "ordered" && updated && updated.supplierId) {
+      if (nextStatus === "ordered" && updated && updated.supplierId) {
         await storage.createPurchaseOrder({
           orderNumber: genNumber("PO"),
           requestId: updated.id,
@@ -212,7 +273,7 @@ export async function registerRoutes(
     res.json(order);
   });
 
-  app.post("/api/purchase-orders", async (req, res) => {
+  app.post("/api/purchase-orders", requireRole(...PURCHASING_ROLES), async (req, res) => {
     const parsed = insertPurchaseOrderSchema.safeParse({
       ...req.body,
       orderNumber: req.body?.orderNumber || genNumber("PO"),
@@ -222,7 +283,7 @@ export async function registerRoutes(
     res.status(201).json(await storage.createPurchaseOrder(parsed.data));
   });
 
-  app.patch("/api/purchase-orders/:id", async (req, res) => {
+  app.patch("/api/purchase-orders/:id", requireRole(...PURCHASING_ROLES), async (req, res) => {
     const parsed = insertPurchaseOrderSchema.partial().safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
     const updated = await storage.updatePurchaseOrder(Number(req.params.id), parsed.data);
@@ -241,7 +302,7 @@ export async function registerRoutes(
     res.json(invoice);
   });
 
-  app.post("/api/invoices", async (req, res) => {
+  app.post("/api/invoices", requireRole(...PURCHASING_ROLES), async (req, res) => {
     const parsed = insertInvoiceSchema.safeParse({
       ...req.body,
       receivedAt: req.body?.receivedAt || new Date().toISOString(),
@@ -267,7 +328,7 @@ export async function registerRoutes(
     res.status(201).json(invoice);
   });
 
-  app.patch("/api/invoices/:id", async (req, res) => {
+  app.patch("/api/invoices/:id", requireRole(...PURCHASING_ROLES), async (req, res) => {
     const parsed = insertInvoiceSchema.partial().safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
     const updated = await storage.updateInvoice(Number(req.params.id), parsed.data);
@@ -282,7 +343,7 @@ export async function registerRoutes(
   app.post("/api/punchout/sessions", async (req, res) => {
     const parsed = insertPunchoutSessionSchema.safeParse({
       requestId: req.body?.requestId ?? null,
-      userId: req.body?.userId,
+      userId: req.user!.id,
       status: "pending",
       cartJson: "[]",
       createdAt: new Date().toISOString(),

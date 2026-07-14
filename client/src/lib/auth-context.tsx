@@ -1,6 +1,9 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
-import { apiRequest } from "./queryClient";
+import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
+import { apiRequest, setAuthToken, setUnauthorizedHandler } from "./queryClient";
 import type { User } from "@shared/schema";
+
+// All demo-seeded users share this password (see server/seed.ts / README).
+const DEMO_PASSWORD = "demo1234";
 
 interface AuthContextValue {
   user: User | null;
@@ -8,7 +11,7 @@ interface AuthContextValue {
   error: string | null;
   login: (email: string, password: string) => Promise<boolean>;
   logout: () => void;
-  switchUser: (user: User) => void;
+  switchUser: (user: User) => Promise<boolean>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -18,13 +21,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const clearSession = useCallback(() => {
+    setAuthToken(null);
+    setUser(null);
+  }, []);
+
+  useEffect(() => {
+    setUnauthorizedHandler(clearSession);
+    return () => setUnauthorizedHandler(null);
+  }, [clearSession]);
+
   const login = useCallback(async (email: string, password: string) => {
     setIsLoading(true);
     setError(null);
     try {
       const res = await apiRequest("POST", "/api/auth/login", { email, password });
-      const data = await res.json();
-      setUser(data);
+      const { user, token } = await res.json();
+      setAuthToken(token);
+      setUser(user);
       return true;
     } catch (e: any) {
       setError("E-Mail oder Passwort ist falsch.");
@@ -34,8 +48,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const logout = useCallback(() => setUser(null), []);
-  const switchUser = useCallback((u: User) => setUser(u), []);
+  const logout = useCallback(() => {
+    apiRequest("POST", "/api/auth/logout").catch(() => {});
+    clearSession();
+  }, [clearSession]);
+
+  // The one-click demo user switcher on the login page still has to go through a real
+  // login — it just reuses the shared demo password instead of asking for it again.
+  const switchUser = useCallback((u: User) => login(u.email, DEMO_PASSWORD), [login]);
 
   return (
     <AuthContext.Provider value={{ user, isLoading, error, login, logout, switchUser }}>

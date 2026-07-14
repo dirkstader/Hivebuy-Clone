@@ -10,121 +10,20 @@ import type {
   PunchoutSession, InsertPunchoutSession,
 } from '@shared/schema';
 import { drizzle } from "drizzle-orm/better-sqlite3";
+import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import Database from "better-sqlite3";
 import { eq, desc } from "drizzle-orm";
+import { hashPassword } from "./password";
 
-const sqlite = new Database("data.db");
+const sqlite = new Database(process.env.DATABASE_PATH || "data.db");
 sqlite.pragma("journal_mode = WAL");
 
 export const db = drizzle(sqlite);
 
-// ---------- Schema bootstrap (no migrations tool wired up, so create tables directly) ----------
-sqlite.exec(`
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  email TEXT NOT NULL UNIQUE,
-  password TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'requester',
-  department TEXT NOT NULL DEFAULT '',
-  cost_center_id INTEGER
-);
-CREATE TABLE IF NOT EXISTS cost_centers (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  code TEXT NOT NULL UNIQUE,
-  owner TEXT NOT NULL DEFAULT '',
-  city TEXT NOT NULL DEFAULT '',
-  annual_budget REAL NOT NULL DEFAULT 0,
-  spent REAL NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS suppliers (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL,
-  category TEXT NOT NULL DEFAULT '',
-  contact_name TEXT NOT NULL DEFAULT '',
-  email TEXT NOT NULL DEFAULT '',
-  phone TEXT NOT NULL DEFAULT '',
-  address TEXT NOT NULL DEFAULT '',
-  rating INTEGER NOT NULL DEFAULT 4,
-  status TEXT NOT NULL DEFAULT 'active'
-);
-CREATE TABLE IF NOT EXISTS catalog_items (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  supplier_id INTEGER NOT NULL,
-  sku TEXT NOT NULL,
-  name TEXT NOT NULL,
-  description TEXT NOT NULL DEFAULT '',
-  unit TEXT NOT NULL DEFAULT 'Stk.',
-  unit_price REAL NOT NULL DEFAULT 0,
-  category TEXT NOT NULL DEFAULT '',
-  brand TEXT NOT NULL DEFAULT '',
-  ean TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS purchase_requests (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  request_number TEXT NOT NULL UNIQUE,
-  requester_id INTEGER NOT NULL,
-  cost_center_id INTEGER NOT NULL,
-  supplier_id INTEGER,
-  title TEXT NOT NULL,
-  justification TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL DEFAULT 'draft',
-  total_amount REAL NOT NULL DEFAULT 0,
-  approver_id INTEGER,
-  approver_comment TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL,
-  decided_at TEXT
-);
-CREATE TABLE IF NOT EXISTS request_line_items (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  request_id INTEGER NOT NULL,
-  catalog_item_id INTEGER,
-  description TEXT NOT NULL,
-  quantity REAL NOT NULL DEFAULT 1,
-  unit_price REAL NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS purchase_orders (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  order_number TEXT NOT NULL UNIQUE,
-  request_id INTEGER NOT NULL,
-  supplier_id INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'open',
-  total_amount REAL NOT NULL DEFAULT 0,
-  ordered_at TEXT NOT NULL,
-  expected_delivery TEXT
-);
-CREATE TABLE IF NOT EXISTS invoices (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  invoice_number TEXT NOT NULL,
-  order_id INTEGER NOT NULL,
-  supplier_id INTEGER NOT NULL,
-  amount REAL NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'pending_review',
-  received_at TEXT NOT NULL,
-  due_date TEXT,
-  match_note TEXT NOT NULL DEFAULT '',
-  paid_at TEXT
-);
-CREATE TABLE IF NOT EXISTS punchout_sessions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  request_id INTEGER,
-  user_id INTEGER NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  cart_json TEXT NOT NULL DEFAULT '[]',
-  created_at TEXT NOT NULL,
-  returned_at TEXT
-);
-CREATE TABLE IF NOT EXISTS activity_log (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  entity_type TEXT NOT NULL,
-  entity_id INTEGER NOT NULL,
-  actor_id INTEGER,
-  action TEXT NOT NULL,
-  note TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
-);
-`);
+// Applies migrations/*.sql (generated via `npm run db:generate`), tracked in the
+// __drizzle_migrations table — replaces the old CREATE TABLE IF NOT EXISTS bootstrap so
+// schema changes are versioned and reviewable instead of applied ad hoc.
+migrate(db, { migrationsFolder: "./migrations" });
 
 export interface IStorage {
   // Users
@@ -190,7 +89,9 @@ export class DatabaseStorage implements IStorage {
   async getUser(id: number) { return db.select().from(users).where(eq(users.id, id)).get(); }
   async getUserByEmail(email: string) { return db.select().from(users).where(eq(users.email, email)).get(); }
   async listUsers() { return db.select().from(users).all(); }
-  async createUser(u: InsertUser) { return db.insert(users).values(u).returning().get(); }
+  async createUser(u: InsertUser) {
+    return db.insert(users).values({ ...u, password: await hashPassword(u.password) }).returning().get();
+  }
 
   async listCostCenters() { return db.select().from(costCenters).all(); }
   async getCostCenter(id: number) { return db.select().from(costCenters).where(eq(costCenters.id, id)).get(); }
