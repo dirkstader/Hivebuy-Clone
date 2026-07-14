@@ -104,15 +104,21 @@ describe("purchase request approval workflow", () => {
     expect(order.status).toBe(200);
 
     const orders = await request(app).get("/api/purchase-orders").set(...auth(jana.token));
-    expect(orders.body.some((o: any) => o.requestId === id)).toBe(true);
+    const po = orders.body.find((o: any) => o.requestId === id);
+    expect(po).toBeTruthy();
 
-    // Purchasing confirms goods receipt.
-    const receive = await request(app)
-      .patch(`/api/purchase-requests/${id}`)
+    // Goods receipt now runs through the receipts endpoint. Book the full quantity.
+    const poDetail = await request(app).get(`/api/purchase-orders/${po.id}`).set(...auth(jana.token));
+    const receiptLines = poDetail.body.lines.map((l: any) => ({ requestLineItemId: l.id, quantityReceived: l.quantity }));
+    const receipt = await request(app)
+      .post(`/api/purchase-orders/${po.id}/receipts`)
       .set(...auth(jana.token))
-      .send({ status: "received" });
-    expect(receive.status).toBe(200);
-    expect(receive.body.status).toBe("received");
+      .send({ lines: receiptLines });
+    expect(receipt.status).toBe(201);
+
+    // Fully received -> request flips to "received".
+    const after = await request(app).get(`/api/purchase-requests/${id}`).set(...auth(jana.token));
+    expect(after.body.status).toBe("received");
   });
 
   it("requires a second (finance) approval for requests over the threshold", async () => {

@@ -5,8 +5,12 @@ import { ArrowLeft, Check, X, ShoppingCart, PackageCheck, Send, Clock } from "lu
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter,
+} from "@/components/ui/dialog";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth, ROLE_LABELS } from "@/lib/auth-context";
@@ -15,10 +19,13 @@ import {
 } from "@/lib/format";
 import type { PurchaseRequest, RequestLineItem, ActivityLog, ApprovalStep, Supplier, CostCenter, User } from "@shared/schema";
 
+type LineItemWithReceived = RequestLineItem & { quantityReceived?: number };
 type RequestDetailResponse = PurchaseRequest & {
-  lineItems: RequestLineItem[];
+  lineItems: LineItemWithReceived[];
   activity: ActivityLog[];
   approvalSteps: ApprovalStep[];
+  orderId: number | null;
+  orderStatus: string | null;
 };
 
 const ACTION_LABELS: Record<string, string> = {
@@ -45,6 +52,8 @@ export default function RequestDetail() {
   const { user } = useAuth();
   const { toast } = useToast();
   const [comment, setComment] = useState("");
+  const [receiptOpen, setReceiptOpen] = useState(false);
+  const [receiptQty, setReceiptQty] = useState<Record<number, string>>({});
 
   const { data, isLoading } = useQuery<RequestDetailResponse>({
     queryKey: ["/api/purchase-requests", id],
@@ -86,6 +95,20 @@ export default function RequestDetail() {
     onError: () => toast({ title: "Aktion fehlgeschlagen", variant: "destructive" }),
   });
 
+  const bookReceipt = useMutation({
+    mutationFn: async (payload: { lines: { requestLineItemId: number; quantityReceived: number }[] }) => {
+      const res = await apiRequest("POST", `/api/purchase-orders/${data?.orderId}/receipts`, payload);
+      return res.json();
+    },
+    onSuccess: () => {
+      invalidateAll();
+      setReceiptOpen(false);
+      setReceiptQty({});
+      toast({ title: "Wareneingang gebucht" });
+    },
+    onError: () => toast({ title: "Aktion fehlgeschlagen", variant: "destructive" }),
+  });
+
   if (isLoading) {
     return (
       <div className="p-4 sm:p-6 space-y-4 max-w-4xl">
@@ -114,6 +137,8 @@ export default function RequestDetail() {
   const canOrder = isPurchasing && data.status === "approved";
   const canReceive = isPurchasing && data.status === "ordered";
   const canSubmit = data.status === "draft" && data.requesterId === user?.id;
+  const showReceived = data.orderId != null;
+  const outstanding = (li: LineItemWithReceived) => Math.max(0, li.quantity - (li.quantityReceived ?? 0));
 
   return (
     <div className="p-4 sm:p-6 space-y-5 max-w-4xl">
@@ -178,19 +203,28 @@ export default function RequestDetail() {
                 <tr className="text-left text-xs text-muted-foreground">
                   <th className="px-3 py-2 font-medium">Beschreibung</th>
                   <th className="px-3 py-2 font-medium text-right">Menge</th>
+                  {showReceived && <th className="px-3 py-2 font-medium text-right">Erhalten</th>}
                   <th className="px-3 py-2 font-medium text-right">Einzelpreis</th>
                   <th className="px-3 py-2 font-medium text-right">Summe</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {data.lineItems.map((li) => (
-                  <tr key={li.id} data-testid={`row-line-item-${li.id}`}>
-                    <td className="px-3 py-2">{li.description}</td>
-                    <td className="px-3 py-2 text-right">{li.quantity}</td>
-                    <td className="px-3 py-2 text-right">{formatCurrency(li.unitPrice)}</td>
-                    <td className="px-3 py-2 text-right font-medium">{formatCurrency(li.quantity * li.unitPrice)}</td>
-                  </tr>
-                ))}
+                {data.lineItems.map((li) => {
+                  const received = li.quantityReceived ?? 0;
+                  return (
+                    <tr key={li.id} data-testid={`row-line-item-${li.id}`}>
+                      <td className="px-3 py-2">{li.description}</td>
+                      <td className="px-3 py-2 text-right">{li.quantity}</td>
+                      {showReceived && (
+                        <td className={`px-3 py-2 text-right ${received >= li.quantity ? "text-primary" : "text-muted-foreground"}`} data-testid={`text-received-${li.id}`}>
+                          {received}
+                        </td>
+                      )}
+                      <td className="px-3 py-2 text-right">{formatCurrency(li.unitPrice)}</td>
+                      <td className="px-3 py-2 text-right font-medium">{formatCurrency(li.quantity * li.unitPrice)}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -265,16 +299,65 @@ export default function RequestDetail() {
             )}
             {canReceive && (
               <Button
-                onClick={() => transition.mutate({ status: "received" })}
-                disabled={transition.isPending}
+                onClick={() => {
+                  setReceiptQty(Object.fromEntries(data.lineItems.map((li) => [li.id, String(outstanding(li))])));
+                  setReceiptOpen(true);
+                }}
+                disabled={bookReceipt.isPending}
                 data-testid="button-receive"
               >
-                <PackageCheck className="h-4 w-4" /> Wareneingang bestätigen
+                <PackageCheck className="h-4 w-4" /> Wareneingang erfassen
               </Button>
             )}
           </CardContent>
         </Card>
       )}
+
+      <Dialog open={receiptOpen} onOpenChange={setReceiptOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Wareneingang erfassen</DialogTitle>
+            <DialogDescription>
+              Erfasse die tatsächlich gelieferten Mengen. Teillieferungen sind möglich — die Bestellung
+              wird erst als vollständig erhalten markiert, wenn alle Positionen geliefert sind.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {data.lineItems.map((li) => (
+              <div key={li.id} className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm truncate">{li.description}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Bestellt {li.quantity} · bereits erhalten {li.quantityReceived ?? 0}
+                  </p>
+                </div>
+                <Input
+                  type="number"
+                  min={0}
+                  className="w-24 shrink-0"
+                  value={receiptQty[li.id] ?? ""}
+                  onChange={(e) => setReceiptQty((prev) => ({ ...prev, [li.id]: e.target.value }))}
+                  data-testid={`input-receipt-qty-${li.id}`}
+                />
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={() => {
+                const lines = data.lineItems
+                  .map((li) => ({ requestLineItemId: li.id, quantityReceived: Number(receiptQty[li.id] || 0) }))
+                  .filter((l) => l.quantityReceived > 0);
+                bookReceipt.mutate({ lines });
+              }}
+              disabled={bookReceipt.isPending || data.lineItems.every((li) => Number(receiptQty[li.id] || 0) <= 0)}
+              data-testid="button-confirm-receipt"
+            >
+              <PackageCheck className="h-4 w-4" /> Wareneingang buchen
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {steps.length > 0 && (
         <Card>

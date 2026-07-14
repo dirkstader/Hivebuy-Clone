@@ -3,12 +3,12 @@ import request from "supertest";
 import type { Express } from "express";
 import { makeApp, loginAs } from "./test-utils";
 
-describe("invoice 3-way match", () => {
+describe("invoice 3-way match (order ↔ goods receipt ↔ invoice)", () => {
   let app: Express;
   let jana: Awaited<ReturnType<typeof loginAs>>; // purchasing
   let lea: Awaited<ReturnType<typeof loginAs>>; // requester
-  let orderA: { id: number; totalAmount: number };
-  let orderB: { id: number; totalAmount: number };
+  let receivedOrder: { id: number; totalAmount: number }; // seeded, fully received (PO-2026-0098)
+  let openOrder: { id: number; totalAmount: number }; // seeded, no goods receipt (PO-2026-0114)
 
   const auth = (token: string) => ["Authorization", `Bearer ${token}`] as [string, string];
 
@@ -18,35 +18,44 @@ describe("invoice 3-way match", () => {
     lea = await loginAs(app, "lea.brandt@ounda.de");
 
     const orders = await request(app).get("/api/purchase-orders").set(...auth(jana.token));
-    orderA = orders.body.find((o: any) => o.orderNumber === "PO-2026-0114");
-    orderB = orders.body.find((o: any) => o.orderNumber === "PO-2026-0098");
+    receivedOrder = orders.body.find((o: any) => o.orderNumber === "PO-2026-0098");
+    openOrder = orders.body.find((o: any) => o.orderNumber === "PO-2026-0114");
   });
 
   it("rejects invoice capture from a non-purchasing role", async () => {
     const res = await request(app)
       .post("/api/invoices")
       .set(...auth(lea.token))
-      .send({ invoiceNumber: "RE-TEST-1", orderId: orderA.id, supplierId: 1, amount: orderA.totalAmount });
+      .send({ invoiceNumber: "RE-T1", orderId: receivedOrder.id, supplierId: 1, amount: receivedOrder.totalAmount });
     expect(res.status).toBe(403);
   });
 
-  it("marks an invoice as matched when the amount equals the order total", async () => {
+  it("matches when goods are fully received and the amount equals the received value", async () => {
     const res = await request(app)
       .post("/api/invoices")
       .set(...auth(jana.token))
-      .send({ invoiceNumber: "RE-TEST-2", orderId: orderA.id, supplierId: 1, amount: orderA.totalAmount });
+      .send({ invoiceNumber: "RE-T2", orderId: receivedOrder.id, supplierId: 1, amount: receivedOrder.totalAmount });
     expect(res.status).toBe(201);
     expect(res.body.status).toBe("matched");
   });
 
-  it("flags a discrepancy when the amount differs from the order total", async () => {
-    const wrongAmount = orderB.totalAmount + 50;
+  it("flags a discrepancy when nothing has been received yet", async () => {
     const res = await request(app)
       .post("/api/invoices")
       .set(...auth(jana.token))
-      .send({ invoiceNumber: "RE-TEST-3", orderId: orderB.id, supplierId: 1, amount: wrongAmount });
+      .send({ invoiceNumber: "RE-T3", orderId: openOrder.id, supplierId: 1, amount: openOrder.totalAmount });
     expect(res.status).toBe(201);
     expect(res.body.status).toBe("discrepancy");
-    expect(res.body.matchNote).toContain("50");
+    expect(res.body.matchNote).toContain("Wareneingang");
+  });
+
+  it("flags a discrepancy when the billed amount exceeds the received value", async () => {
+    const res = await request(app)
+      .post("/api/invoices")
+      .set(...auth(jana.token))
+      .send({ invoiceNumber: "RE-T4", orderId: receivedOrder.id, supplierId: 1, amount: receivedOrder.totalAmount + 100 });
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe("discrepancy");
+    expect(res.body.matchNote).toContain("geliefert");
   });
 });

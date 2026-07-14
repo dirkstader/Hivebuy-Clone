@@ -127,7 +127,7 @@ export async function seedIfEmpty() {
     status: "received", totalAmount: 1674.0, approverId: admin.id, approverComment: "Freigegeben.",
     createdAt: daysAgo(35), decidedAt: daysAgo(33),
   });
-  await storage.createLineItem({ requestId: r5.id, description: "27\" Business-Monitor", quantity: 6, unitPrice: 279.0 });
+  const r5Line = await storage.createLineItem({ requestId: r5.id, description: "27\" Business-Monitor", quantity: 6, unitPrice: 279.0 });
 
   const r6 = await storage.createPurchaseRequest({
     requestNumber: "BA-2026-0044", requesterId: requester1.id, costCenterId: ccFiliale1.id,
@@ -156,16 +156,21 @@ export async function seedIfEmpty() {
     totalAmount: 1674.0, orderedAt: daysAgo(32), expectedDelivery: daysAgo(25),
   });
 
-  // Invoices — including a 3-way-match discrepancy example
+  // o2 was fully received — book the matching goods receipt so the 3-way match holds.
+  // (o1 has no receipt yet, matching r4's "ordered" state.)
+  const gr = await storage.createGoodsReceipt({ orderId: o2.id, receivedById: purchasing.id, note: "Vollständig geliefert.", receivedAt: daysAgo(26) });
+  await storage.createGoodsReceiptLine({ receiptId: gr.id, requestLineItemId: r5Line.id, quantityReceived: 6 });
+
+  // Invoices — a clean 3-way match (o2, fully received) and a discrepancy (o1, billed before receipt)
   await storage.createInvoice({
     invoiceNumber: "RE-88213", orderId: o2.id, supplierId: supIT.id, amount: 1674.0,
     status: "matched", receivedAt: daysAgo(24), dueDate: daysAgo(-6),
-    matchNote: "Bestellung, Wareneingang und Rechnung stimmen exakt überein.",
+    matchNote: "3-Way-Match ok: bestellt, geliefert und berechnet stimmen überein (1.674,00 €).",
   });
   await storage.createInvoice({
     invoiceNumber: "RE-88450", orderId: o1.id, supplierId: supIT.id, amount: 1830.0,
     status: "discrepancy", receivedAt: daysAgo(3), dueDate: daysAgo(-27),
-    matchNote: "Rechnungsbetrag (1.830,00 €) übersteigt Bestellwert (1.780,00 €) um 50,00 € — Versandkosten wurden separat berechnet, klären mit Lieferant.",
+    matchNote: "Abweichung im 3-Way-Match: bestellt 1.780,00 € · geliefert 0,00 € · berechnet 1.830,00 € (Wareneingang unvollständig).",
   });
 
   // Update cost center spent totals from approved/ordered/received requests

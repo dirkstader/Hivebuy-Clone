@@ -183,6 +183,34 @@ export interface PunchoutCartLine {
   imageUrl?: string;
 }
 
+// ---------- Goods Receipts (Wareneingang) for the 3-way match ----------
+// A purchase order is received in one or more goods receipts. Each receipt line records the
+// quantity actually received for a request line item (a PO maps 1:1 to a request, so its
+// lines are the request's line items). The invoice match compares ordered vs received vs
+// invoiced — see server/routes.ts.
+export const goodsReceipts = sqliteTable("goods_receipts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  orderId: integer("order_id").notNull(),
+  receivedById: integer("received_by_id"),
+  note: text("note").notNull().default(""),
+  receivedAt: text("received_at").notNull(),
+});
+
+export const insertGoodsReceiptSchema = createInsertSchema(goodsReceipts).omit({ id: true });
+export type InsertGoodsReceipt = z.infer<typeof insertGoodsReceiptSchema>;
+export type GoodsReceipt = typeof goodsReceipts.$inferSelect;
+
+export const goodsReceiptLines = sqliteTable("goods_receipt_lines", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  receiptId: integer("receipt_id").notNull(),
+  requestLineItemId: integer("request_line_item_id").notNull(),
+  quantityReceived: real("quantity_received").notNull().default(0),
+});
+
+export const insertGoodsReceiptLineSchema = createInsertSchema(goodsReceiptLines).omit({ id: true });
+export type InsertGoodsReceiptLine = z.infer<typeof insertGoodsReceiptLineSchema>;
+export type GoodsReceiptLine = typeof goodsReceiptLines.$inferSelect;
+
 // ---------- Approval Steps (multi-level approval chain per request) ----------
 // A request's approval chain is a sequence of steps resolved in stepOrder. Each step is
 // satisfied by any user whose role covers approverRole (finance covers approver too). The

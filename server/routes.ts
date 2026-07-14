@@ -49,6 +49,23 @@ function canActOnStep(userRole: string, stepRole: string): boolean {
   return userRole === "approver" && stepRole === "approver";
 }
 
+// The receipt state of a purchase order: its request's line items enriched with the
+// quantity received so far, plus the derived ordered/received values and fully-received flag.
+// A PO maps 1:1 to a request, so the request's line items are the PO's lines.
+async function orderReceiptState(orderId: number, requestId: number) {
+  const lineItems = await storage.listLineItems(requestId);
+  const received = await storage.receivedQuantitiesByOrder(orderId);
+  const lines = lineItems.map((li) => ({
+    ...li,
+    quantityReceived: received.get(li.id) ?? 0,
+  }));
+  const orderedValue = lines.reduce((sum, l) => sum + l.quantity * l.unitPrice, 0);
+  const receivedValue = lines.reduce((sum, l) => sum + l.quantityReceived * l.unitPrice, 0);
+  const anyReceived = lines.some((l) => l.quantityReceived > 0);
+  const fullyReceived = lines.length > 0 && lines.every((l) => l.quantityReceived >= l.quantity);
+  return { lines, orderedValue, receivedValue, anyReceived, fullyReceived };
+}
+
 function genNumber(prefix: string) {
   const year = new Date().getFullYear();
   const seq = Math.floor(1000 + Math.random() * 9000);
@@ -170,10 +187,18 @@ export async function registerRoutes(
   app.get("/api/purchase-requests/:id", async (req, res) => {
     const request = await storage.getPurchaseRequest(Number(req.params.id));
     if (!request) return res.status(404).json({ message: "Bestellanforderung nicht gefunden." });
-    const lineItems = await storage.listLineItems(request.id);
+    let lineItems: any[] = await storage.listLineItems(request.id);
     const activity = await storage.listActivity("request", request.id);
     const approvalSteps = await storage.listApprovalSteps(request.id);
-    res.json({ ...request, lineItems, activity, approvalSteps });
+
+    // Enrich line items with received quantities once a purchase order exists.
+    const order = (await storage.listPurchaseOrders()).find((o) => o.requestId === request.id);
+    if (order) {
+      const received = await storage.receivedQuantitiesByOrder(order.id);
+      lineItems = lineItems.map((li) => ({ ...li, quantityReceived: received.get(li.id) ?? 0 }));
+    }
+
+    res.json({ ...request, lineItems, activity, approvalSteps, orderId: order?.id ?? null, orderStatus: order?.status ?? null });
   });
 
   app.post("/api/purchase-requests", async (req, res) => {
@@ -231,14 +256,13 @@ export async function registerRoutes(
     const isPurchasing = (PURCHASING_ROLES as readonly string[]).includes(actor.role);
     const nextStatus = parsed.data.status;
 
-    // Approve/reject are NOT handled here — they run through POST /:id/decision so the
-    // multi-step chain can be resolved. This PATCH only covers submit and the purchasing-side
-    // transitions, plus draft edits (line items / fields by the owner).
+    // Approve/reject run through POST /:id/decision (multi-step chain); goods receipt runs
+    // through POST /api/purchase-orders/:id/receipts (which flips the request to "received").
+    // This PATCH only covers submit and "ordered", plus draft edits by the owner.
     if (nextStatus && nextStatus !== existing.status) {
       const allowed =
         (nextStatus === "pending_approval" && existing.status === "draft" && isOwner) ||
-        (nextStatus === "ordered" && existing.status === "approved" && isPurchasing) ||
-        (nextStatus === "received" && existing.status === "ordered" && isPurchasing);
+        (nextStatus === "ordered" && existing.status === "approved" && isPurchasing);
       if (!allowed) {
         return res.status(403).json({ message: "Für diesen Statuswechsel fehlt die Berechtigung." });
       }
@@ -362,7 +386,61 @@ export async function registerRoutes(
   app.get("/api/purchase-orders/:id", async (req, res) => {
     const order = await storage.getPurchaseOrder(Number(req.params.id));
     if (!order) return res.status(404).json({ message: "Bestellung nicht gefunden." });
-    res.json(order);
+    const { lines, orderedValue, receivedValue, fullyReceived } = await orderReceiptState(order.id, order.requestId);
+    const receipts = await storage.listGoodsReceiptsByOrder(order.id);
+    res.json({ ...order, lines, receipts, orderedValue, receivedValue, fullyReceived });
+  });
+
+  // Book a goods receipt against a purchase order. Records received quantities per line,
+  // recomputes the PO status (open / partially_received / received), and once every line is
+  // fully received flips the linked request to "received".
+  app.post("/api/purchase-orders/:id/receipts", requireRole(...PURCHASING_ROLES), async (req, res) => {
+    const orderId = Number(req.params.id);
+    const order = await storage.getPurchaseOrder(orderId);
+    if (!order) return res.status(404).json({ message: "Bestellung nicht gefunden." });
+
+    const inputLines = Array.isArray(req.body?.lines) ? req.body.lines : [];
+    const note = typeof req.body?.note === "string" ? req.body.note : "";
+    const valid = inputLines
+      .map((l: any) => ({ requestLineItemId: Number(l.requestLineItemId), quantityReceived: Number(l.quantityReceived) }))
+      .filter((l: any) => Number.isFinite(l.requestLineItemId) && Number.isFinite(l.quantityReceived) && l.quantityReceived > 0);
+    if (valid.length === 0) {
+      return res.status(400).json({ message: "Es wurde keine empfangene Menge angegeben." });
+    }
+
+    const now = new Date().toISOString();
+    const receipt = await storage.createGoodsReceipt({
+      orderId, receivedById: req.user!.id, note, receivedAt: now,
+    });
+    for (const line of valid) {
+      await storage.createGoodsReceiptLine({
+        receiptId: receipt.id, requestLineItemId: line.requestLineItemId, quantityReceived: line.quantityReceived,
+      });
+    }
+
+    // Recompute PO + request status from the aggregate received quantities.
+    const state = await orderReceiptState(orderId, order.requestId);
+    const orderStatus = state.fullyReceived ? "received" : state.anyReceived ? "partially_received" : "open";
+    await storage.updatePurchaseOrder(orderId, { status: orderStatus });
+
+    await storage.createActivity({
+      entityType: "order", entityId: orderId, actorId: req.user!.id,
+      action: state.fullyReceived ? "received" : "partially_received", note, createdAt: now,
+    });
+
+    if (state.fullyReceived) {
+      const request = await storage.getPurchaseRequest(order.requestId);
+      if (request && request.status === "ordered") {
+        await storage.updatePurchaseRequest(order.requestId, { status: "received" });
+        await storage.createActivity({
+          entityType: "request", entityId: order.requestId, actorId: req.user!.id,
+          action: "received", note, createdAt: now,
+        });
+      }
+    }
+
+    const updatedOrder = await storage.getPurchaseOrder(orderId);
+    res.status(201).json({ ...updatedOrder, lines: state.lines, fullyReceived: state.fullyReceived });
   });
 
   app.post("/api/purchase-orders", requireRole(...PURCHASING_ROLES), async (req, res) => {
@@ -401,22 +479,31 @@ export async function registerRoutes(
     });
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
 
-    // Simple 3-way match: compare invoice amount to the linked order's total.
+    const amount = parsed.data.amount ?? 0;
+    const fmt = (v: number) => `${v.toFixed(2)} €`;
+
+    // Real 3-way match: order (bestellt) ↔ goods receipt (geliefert) ↔ invoice (berechnet).
+    // An invoice only matches if the goods are fully received AND the billed amount equals
+    // the received value; anything else is a discrepancy explaining which leg disagrees.
     const order = await storage.getPurchaseOrder(parsed.data.orderId);
     let status = parsed.data.status;
     let matchNote = parsed.data.matchNote;
     if (order) {
-      const diff = Math.abs(order.totalAmount - parsed.data.amount);
-      if (diff < 0.01) {
+      const { orderedValue, receivedValue, anyReceived, fullyReceived } = await orderReceiptState(order.id, order.requestId);
+      if (!anyReceived) {
+        status = "discrepancy";
+        matchNote = `Noch kein Wareneingang gebucht — Rechnung über ${fmt(amount)} kann nicht abgeglichen werden (bestellt ${fmt(orderedValue)}).`;
+      } else if (Math.abs(receivedValue - amount) < 0.01 && fullyReceived) {
         status = "matched";
-        matchNote = "Bestellung und Rechnung stimmen exakt überein.";
+        matchNote = `3-Way-Match ok: bestellt, geliefert und berechnet stimmen überein (${fmt(amount)}).`;
       } else {
         status = "discrepancy";
-        matchNote = `Abweichung von ${diff.toFixed(2)} € zwischen Bestellwert (${order.totalAmount.toFixed(2)} €) und Rechnungsbetrag (${parsed.data.amount.toFixed(2)} €).`;
+        const parts = [`bestellt ${fmt(orderedValue)}`, `geliefert ${fmt(receivedValue)}`, `berechnet ${fmt(amount)}`];
+        matchNote = `Abweichung im 3-Way-Match: ${parts.join(" · ")}${fullyReceived ? "" : " (Wareneingang unvollständig)"}.`;
       }
     }
 
-    const invoice = await storage.createInvoice({ ...parsed.data, status, matchNote });
+    const invoice = await storage.createInvoice({ ...parsed.data, amount, status, matchNote });
     res.status(201).json(invoice);
   });
 

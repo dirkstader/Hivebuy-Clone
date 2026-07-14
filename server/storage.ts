@@ -1,6 +1,7 @@
 import {
   users, costCenters, suppliers, catalogItems, purchaseRequests, requestLineItems,
   purchaseOrders, invoices, activityLog, punchoutSessions, approvalSteps,
+  goodsReceipts, goodsReceiptLines,
 } from '@shared/schema';
 import type {
   User, InsertUser, CostCenter, InsertCostCenter, Supplier, InsertSupplier,
@@ -8,6 +9,7 @@ import type {
   RequestLineItem, InsertRequestLineItem, PurchaseOrder, InsertPurchaseOrder,
   Invoice, InsertInvoice, ActivityLog, InsertActivityLog,
   PunchoutSession, InsertPunchoutSession, ApprovalStep, InsertApprovalStep,
+  GoodsReceipt, InsertGoodsReceipt, GoodsReceiptLine, InsertGoodsReceiptLine,
 } from '@shared/schema';
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
@@ -79,6 +81,14 @@ export interface IStorage {
   listApprovalSteps(requestId: number): Promise<ApprovalStep[]>;
   createApprovalStep(s: InsertApprovalStep): Promise<ApprovalStep>;
   updateApprovalStep(id: number, s: Partial<InsertApprovalStep>): Promise<ApprovalStep | undefined>;
+
+  // Goods receipts
+  createGoodsReceipt(r: InsertGoodsReceipt): Promise<GoodsReceipt>;
+  createGoodsReceiptLine(l: InsertGoodsReceiptLine): Promise<GoodsReceiptLine>;
+  listGoodsReceiptsByOrder(orderId: number): Promise<GoodsReceipt[]>;
+  listReceiptLines(receiptId: number): Promise<GoodsReceiptLine[]>;
+  // Total received quantity per requestLineItemId across all receipts for an order.
+  receivedQuantitiesByOrder(orderId: number): Promise<Map<number, number>>;
 
   // Activity log
   listActivity(entityType: string, entityId: number): Promise<ActivityLog[]>;
@@ -161,6 +171,26 @@ export class DatabaseStorage implements IStorage {
   async createApprovalStep(s: InsertApprovalStep) { return db.insert(approvalSteps).values(s).returning().get(); }
   async updateApprovalStep(id: number, s: Partial<InsertApprovalStep>) {
     return db.update(approvalSteps).set(s).where(eq(approvalSteps.id, id)).returning().get();
+  }
+
+  async createGoodsReceipt(r: InsertGoodsReceipt) { return db.insert(goodsReceipts).values(r).returning().get(); }
+  async createGoodsReceiptLine(l: InsertGoodsReceiptLine) { return db.insert(goodsReceiptLines).values(l).returning().get(); }
+  async listGoodsReceiptsByOrder(orderId: number) {
+    return db.select().from(goodsReceipts).where(eq(goodsReceipts.orderId, orderId)).all();
+  }
+  async listReceiptLines(receiptId: number) {
+    return db.select().from(goodsReceiptLines).where(eq(goodsReceiptLines.receiptId, receiptId)).all();
+  }
+  async receivedQuantitiesByOrder(orderId: number) {
+    const receipts = await this.listGoodsReceiptsByOrder(orderId);
+    const totals = new Map<number, number>();
+    for (const receipt of receipts) {
+      const lines = await this.listReceiptLines(receipt.id);
+      for (const line of lines) {
+        totals.set(line.requestLineItemId, (totals.get(line.requestLineItemId) ?? 0) + line.quantityReceived);
+      }
+    }
+    return totals;
   }
 
   async listActivity(entityType: string, entityId: number) {
