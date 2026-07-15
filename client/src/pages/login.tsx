@@ -70,32 +70,34 @@ export default function Login() {
               </Button>
             </form>
 
-            <div className="pt-2 border-t border-border">
-              <p className="text-xs text-muted-foreground mb-2 mt-4">Demo-Zugänge (Passwort: demo1234)</p>
-              <div className="space-y-1.5 max-h-56 overflow-y-auto">
-                {usersLoading && (
-                  <>
-                    <Skeleton className="h-9 w-full" />
-                    <Skeleton className="h-9 w-full" />
-                  </>
-                )}
-                {users?.map((u) => (
-                  <button
-                    key={u.id}
-                    type="button"
-                    data-testid={`button-demo-user-${u.id}`}
-                    onClick={() => switchUser(u)}
-                    className="w-full text-left px-3 py-2 rounded-md border border-border hover-elevate active-elevate-2 flex items-center justify-between gap-2"
-                  >
-                    <span className="text-sm">
-                      <span className="font-medium">{u.name}</span>
-                      <span className="text-muted-foreground"> · {u.department}</span>
-                    </span>
-                    <span className="text-xs text-muted-foreground shrink-0">{ROLE_LABELS[u.role] ?? u.role}</span>
-                  </button>
-                ))}
+            {(usersLoading || !!users?.length) && (
+              <div className="pt-2 border-t border-border">
+                <p className="text-xs text-muted-foreground mb-2 mt-4">Demo-Zugänge (Passwort: demo1234)</p>
+                <div className="space-y-1.5 max-h-56 overflow-y-auto">
+                  {usersLoading && (
+                    <>
+                      <Skeleton className="h-9 w-full" />
+                      <Skeleton className="h-9 w-full" />
+                    </>
+                  )}
+                  {users?.map((u) => (
+                    <button
+                      key={u.id}
+                      type="button"
+                      data-testid={`button-demo-user-${u.id}`}
+                      onClick={() => switchUser(u)}
+                      className="w-full text-left px-3 py-2 rounded-md border border-border hover-elevate active-elevate-2 flex items-center justify-between gap-2"
+                    >
+                      <span className="text-sm">
+                        <span className="font-medium">{u.name}</span>
+                        <span className="text-muted-foreground"> · {u.department}</span>
+                      </span>
+                      <span className="text-xs text-muted-foreground shrink-0">{ROLE_LABELS[u.role] ?? u.role}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
           </CardContent>
         </Card>
       </div>

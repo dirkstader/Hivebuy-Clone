@@ -103,7 +103,10 @@ export async function registerRoutes(
     res.json(sanitizeUser(req.user!));
   });
 
+  // Unauthenticated by design: powers the one-click demo-user switcher on the login page.
+  // Gated behind DEMO_MODE so a real production deploy doesn't expose every user's email.
   app.get("/api/users", async (_req, res) => {
+    if (process.env.DEMO_MODE !== "true") return res.status(404).end();
     res.json((await storage.listUsers()).map(sanitizeUser));
   });
 

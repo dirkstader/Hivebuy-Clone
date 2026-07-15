@@ -26,6 +26,12 @@ app.use(
   }),
 );
 
+// Only trust X-Forwarded-For when actually deployed behind a reverse proxy/load balancer —
+// blindly trusting it would let clients spoof their IP and bypass rate limiting below.
+if (process.env.TRUST_PROXY_HOPS) {
+  app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS));
+}
+
 app.use(
   express.json({
     limit: "512kb",

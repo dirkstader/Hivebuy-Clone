@@ -8,6 +8,7 @@ export default defineConfig({
       // Isolated per test file — never touches the real dev data.db.
       DATABASE_PATH: ":memory:",
       NODE_ENV: "test",
+      DEMO_MODE: "true",
     },
   },
   resolve: {
