@@ -36,6 +36,13 @@
       "when": 1784112426824,
       "tag": "0004_military_legion",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1784131336161,
+      "tag": "0005_chunky_magdalene",
+      "breakpoints": true
     }
   ]
 }

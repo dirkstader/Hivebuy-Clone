@@ -8,6 +8,7 @@ import { seedIfEmpty } from "./seed";
 import { AMAZON_CATALOG } from "./amazon-catalog";
 import { verifyPassword } from "./password";
 import { createSession, destroySession, requireAuth, requireRole, sanitizeUser } from "./auth";
+import type { User } from "@shared/schema";
 import {
   insertUserSchema, createCostCenterRequestSchema, insertSupplierSchema, insertCatalogItemSchema,
   insertPurchaseRequestSchema, insertRequestLineItemSchema, insertPurchaseOrderSchema, insertInvoiceSchema,
@@ -47,6 +48,32 @@ function buildApprovalChain(totalAmount: number): { stepOrder: number; approverR
 function canActOnStep(userRole: string, stepRole: string): boolean {
   if (userRole === "finance") return true;
   return userRole === "approver" && stepRole === "approver";
+}
+
+// Roles eligible to be named as a Freigabe-Vertretung (delegate). Hardcoded for now — a
+// future flag could open this up to any role, but for the first version only approver/
+// finance/purchasing ("Admin") can stand in for someone else's approval authority.
+const DELEGATE_ELIGIBLE_ROLES = ["approver", "finance", "purchasing"] as const;
+
+function delegationIsActive(d: { startsAt: string | null; endsAt: string | null }, nowIso: string): boolean {
+  if (d.startsAt && d.startsAt > nowIso) return false;
+  if (d.endsAt && d.endsAt < nowIso) return false;
+  return true;
+}
+
+// Resolves whose approval authority the actor may exercise for a step of the given role:
+// their own id if their role covers it directly, or — if they are the currently-active
+// delegate for someone whose role covers it — that delegator's id. Shared by the decision
+// endpoint and /api/notifications so both stay in lockstep.
+async function resolveActingAuthority(actor: { id: number; role: string }, stepRole: string): Promise<number | undefined> {
+  if (canActOnStep(actor.role, stepRole)) return actor.id;
+  const now = new Date().toISOString();
+  for (const d of await storage.listApprovalDelegationsByDelegate(actor.id)) {
+    if (!delegationIsActive(d, now)) continue;
+    const delegator = await storage.getUser(d.delegatorId);
+    if (delegator && canActOnStep(delegator.role, stepRole)) return delegator.id;
+  }
+  return undefined;
 }
 
 // The receipt state of a purchase order: its request's line items enriched with the
@@ -373,7 +400,8 @@ export async function registerRoutes(
     }
 
     const actor = req.user!;
-    // Segregation of duties: you cannot decide on your own request.
+    // Segregation of duties: you cannot decide on your own request. (A purchasing/"Admin"
+    // delegate gets a narrower exemption further below, once we know who's really deciding.)
     if (request.requesterId === actor.id) {
       return res.status(403).json({ message: "Die eigene Anforderung kann nicht selbst freigegeben werden." });
     }
@@ -383,13 +411,23 @@ export async function registerRoutes(
     if (!currentStep) {
       return res.status(409).json({ message: "Keine offene Freigabestufe vorhanden." });
     }
-    if (!canActOnStep(actor.role, currentStep.approverRole)) {
+
+    const actingForId = await resolveActingAuthority(actor, currentStep.approverRole);
+    if (actingForId === undefined) {
       return res.status(403).json({ message: "Für diese Freigabestufe fehlt die Berechtigung." });
+    }
+    const isDelegating = actingForId !== actor.id;
+    // Segregation of duties for the represented delegator: a delegate normally can't decide
+    // a request where the person they represent is the requester — except a purchasing
+    // ("Admin") delegate, who is trusted to self-approve on someone else's behalf too.
+    if (isDelegating && actingForId === request.requesterId && actor.role !== "purchasing") {
+      return res.status(403).json({ message: "Die eigene Anforderung kann nicht selbst freigegeben werden." });
     }
 
     const now = new Date().toISOString();
     await storage.updateApprovalStep(currentStep.id, {
-      status: decision, decidedById: actor.id, comment, decidedAt: now,
+      status: decision, decidedById: actor.id, decidedOnBehalfOfId: isDelegating ? actingForId : null,
+      comment, decidedAt: now,
     });
 
     const remaining = steps.filter((s) => s.status === "pending" && s.id !== currentStep.id);
@@ -419,10 +457,12 @@ export async function registerRoutes(
       updated = await storage.updatePurchaseRequest(id, { approverComment: comment });
     }
 
+    const onBehalfOf = isDelegating ? await storage.getUser(actingForId) : undefined;
     await storage.createActivity({
       entityType: "request", entityId: id, actorId: actor.id,
       action: decision === "rejected" ? "rejected" : remaining.length === 0 ? "approved" : "step_approved",
-      note: comment, createdAt: now,
+      note: [comment, onBehalfOf && `(Vertretung für ${onBehalfOf.name})`].filter(Boolean).join(" "),
+      createdAt: now,
     });
 
     const approvalSteps = await storage.listApprovalSteps(id);
@@ -684,6 +724,56 @@ export async function registerRoutes(
     res.json({ spendByCostCenter, spendBySupplier, spendByMonth, requestsByStatus });
   });
 
+  // ---------- Approval delegations (Freigabe-Vertretung) ----------
+  const setDelegationSchema = z.object({
+    delegateId: z.number().int().nullable(),
+    startsAt: z.string().nullable().optional(),
+    endsAt: z.string().nullable().optional(),
+    note: z.string().optional(),
+  });
+
+  app.get("/api/delegations/me", async (req, res) => {
+    const actor = req.user!;
+    const mine = await storage.getApprovalDelegationByDelegator(actor.id);
+    const delegate = mine ? await storage.getUser(mine.delegateId) : undefined;
+
+    const now = new Date().toISOString();
+    const asDelegate = (await storage.listApprovalDelegationsByDelegate(actor.id)).filter((d) => delegationIsActive(d, now));
+    const delegators = await Promise.all(asDelegate.map((d) => storage.getUser(d.delegatorId)));
+    const delegatingFor = delegators.filter((u): u is User => !!u).map(sanitizeUser);
+
+    res.json({
+      delegation: mine ? { ...mine, delegateName: delegate?.name ?? null } : null,
+      delegatingFor,
+    });
+  });
+
+  app.put("/api/delegations/me", requireRole(...DELEGATE_ELIGIBLE_ROLES), async (req, res) => {
+    const actor = req.user!;
+    const parsed = setDelegationSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+
+    if (parsed.data.delegateId === null) {
+      await storage.deleteApprovalDelegationByDelegator(actor.id);
+      return res.json({ delegation: null });
+    }
+    if (parsed.data.delegateId === actor.id) {
+      return res.status(400).json({ message: "Man kann sich nicht selbst als Vertretung eintragen." });
+    }
+    const delegate = await storage.getUser(parsed.data.delegateId);
+    if (!delegate) return res.status(404).json({ message: "Nutzer nicht gefunden." });
+    if (!(DELEGATE_ELIGIBLE_ROLES as readonly string[]).includes(delegate.role)) {
+      return res.status(400).json({ message: "Diese Person kann nicht als Vertretung eingetragen werden (Rolle nicht berechtigt)." });
+    }
+
+    const saved = await storage.upsertApprovalDelegation({
+      delegatorId: actor.id, delegateId: delegate.id,
+      startsAt: parsed.data.startsAt ?? null, endsAt: parsed.data.endsAt ?? null,
+      note: parsed.data.note ?? "", createdAt: new Date().toISOString(),
+    });
+    res.status(201).json({ delegation: { ...saved, delegateName: delegate.name } });
+  });
+
   // ---------- Notifications ----------
   // A derived, role-aware "what needs my attention" list (no persistence, no email — the
   // target runtime has no mailer). Computed live from request state, approval steps and the
@@ -702,13 +792,18 @@ export async function registerRoutes(
       if (r.status === "pending_approval" && r.requesterId !== actor.id) {
         const steps = await storage.listApprovalSteps(r.id);
         const current = steps.find((s) => s.status === "pending");
-        if (current && canActOnStep(actor.role, current.approverRole)) {
-          notifications.push({
-            id: `approval-${r.id}`, type: "approval",
-            title: "Freigabe erforderlich",
-            description: `${r.requestNumber} · ${r.title}`,
-            href: `/requests/${r.id}`, createdAt: r.createdAt,
-          });
+        if (current) {
+          const actingForId = await resolveActingAuthority(actor, current.approverRole);
+          const blockedBySoD = actingForId !== undefined && actingForId !== actor.id
+            && actingForId === r.requesterId && actor.role !== "purchasing";
+          if (actingForId !== undefined && !blockedBySoD) {
+            notifications.push({
+              id: `approval-${r.id}`, type: "approval",
+              title: "Freigabe erforderlich",
+              description: `${r.requestNumber} · ${r.title}`,
+              href: `/requests/${r.id}`, createdAt: r.createdAt,
+            });
+          }
         }
       }
 

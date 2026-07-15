@@ -20,6 +20,7 @@ import Orders from "@/pages/orders";
 import Invoices from "@/pages/invoices";
 import CostCenters from "@/pages/cost-centers";
 import Analytics from "@/pages/analytics";
+import Delegation from "@/pages/delegation";
 import NotFound from "@/pages/not-found";
 
 function AppRouter() {
@@ -34,6 +35,7 @@ function AppRouter() {
       <Route path="/invoices" component={Invoices} />
       <Route path="/cost-centers" component={CostCenters} />
       <Route path="/analytics" component={Analytics} />
+      <Route path="/vertretung" component={Delegation} />
       <Route component={NotFound} />
     </Switch>
   );

@@ -18,6 +18,14 @@ describe("purchase request approval workflow", () => {
     sabine = await loginAs(app, "sabine.krueger@ounda.de");
     dirk = await loginAs(app, "dirk@stader.de");
     jana = await loginAs(app, "jana.weiss@ounda.de");
+
+    // This suite tests plain role-based authorization — clear the seeded demo delegation
+    // (Sabine -> Jana) so it doesn't grant Jana borrowed approval authority here. Delegation
+    // semantics have their own dedicated coverage in approval-delegation.test.ts.
+    await request(app)
+      .put("/api/delegations/me")
+      .set("Authorization", `Bearer ${sabine.token}`)
+      .send({ delegateId: null });
   });
 
   const auth = (token: string) => ["Authorization", `Bearer ${token}`] as [string, string];

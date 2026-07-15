@@ -292,6 +292,9 @@ export const approvalSteps = sqliteTable("approval_steps", {
   approverRole: text("approver_role").notNull(), // required role: approver | finance
   status: text("status").notNull().default("pending"),
   decidedById: integer("decided_by_id"),
+  // Set only when decidedById acted as a delegate on behalf of someone else — see
+  // approvalDelegations below. Null for an ordinary (non-delegated) decision.
+  decidedOnBehalfOfId: integer("decided_on_behalf_of_id"),
   comment: text("comment").notNull().default(""),
   decidedAt: text("decided_at"),
 });
@@ -299,6 +302,26 @@ export const approvalSteps = sqliteTable("approval_steps", {
 export const insertApprovalStepSchema = createInsertSchema(approvalSteps).omit({ id: true });
 export type InsertApprovalStep = z.infer<typeof insertApprovalStepSchema>;
 export type ApprovalStep = typeof approvalSteps.$inferSelect;
+
+// ---------- Approval Delegations (Freigabe-Vertretung) ----------
+// A delegator (approver|finance|purchasing) can name exactly one active delegate at a time
+// to act on their behalf on approval steps. Authority is borrowed from the delegator's role —
+// the delegate doesn't need to hold approver/finance themselves (see buildApprovalChain /
+// resolveActingAuthority in server/routes.ts). Which roles may be named as a delegate is
+// restricted at the route layer, not here, so it can become configurable later.
+export const approvalDelegations = sqliteTable("approval_delegations", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  delegatorId: integer("delegator_id").notNull().unique(),
+  delegateId: integer("delegate_id").notNull(),
+  startsAt: text("starts_at"), // null = effective immediately
+  endsAt: text("ends_at"), // null = unbefristet
+  note: text("note").notNull().default(""),
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertApprovalDelegationSchema = createInsertSchema(approvalDelegations).omit({ id: true });
+export type InsertApprovalDelegation = z.infer<typeof insertApprovalDelegationSchema>;
+export type ApprovalDelegation = typeof approvalDelegations.$inferSelect;
 
 // ---------- Activity Log (for approvals/audit trail) ----------
 export const activityLog = sqliteTable("activity_log", {

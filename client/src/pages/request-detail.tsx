@@ -17,7 +17,7 @@ import { useAuth, ROLE_LABELS } from "@/lib/auth-context";
 import {
   formatCurrency, formatDate, formatDateTime, REQUEST_STATUS_LABELS, statusBadgeVariant,
 } from "@/lib/format";
-import type { PurchaseRequest, RequestLineItem, ActivityLog, ApprovalStep, Supplier, CostCenter, User } from "@shared/schema";
+import type { PurchaseRequest, RequestLineItem, ActivityLog, ApprovalStep, Supplier, CostCenter, User, ApprovalDelegation } from "@shared/schema";
 
 type LineItemWithReceived = RequestLineItem & { quantityReceived?: number };
 type RequestDetailResponse = PurchaseRequest & {
@@ -61,6 +61,9 @@ export default function RequestDetail() {
   const { data: suppliers } = useQuery<Supplier[]>({ queryKey: ["/api/suppliers"] });
   const { data: costCenters } = useQuery<CostCenter[]>({ queryKey: ["/api/cost-centers"] });
   const { data: users } = useQuery<User[]>({ queryKey: ["/api/users"] });
+  const { data: myDelegations } = useQuery<{ delegation: unknown; delegatingFor: User[] }>({
+    queryKey: ["/api/delegations/me"],
+  });
 
   const invalidateAll = () => {
     queryClient.invalidateQueries({ queryKey: ["/api/purchase-requests", id] });
@@ -130,11 +133,18 @@ export default function RequestDetail() {
 
   const steps = data.approvalSteps ?? [];
   const currentStep = steps.find((s) => s.status === "pending");
+  // A delegate may decide on the delegator's behalf if the delegator's role covers this step
+  // — unless the delegator is themselves the requester (segregation of duties), except for a
+  // purchasing/"Admin" delegate, who is trusted to self-approve on someone else's behalf too.
+  const delegatorMatch = currentStep && myDelegations?.delegatingFor.find(
+    (d) => canActOnStep(d.role, currentStep.approverRole) && (d.id !== data.requesterId || user?.role === "purchasing")
+  );
+  const decidingAsDelegate = !!currentStep && !canActOnStep(user?.role, currentStep.approverRole) && !!delegatorMatch;
   const canDecide =
     data.status === "pending_approval" &&
     !!currentStep &&
     data.requesterId !== user?.id &&
-    canActOnStep(user?.role, currentStep.approverRole);
+    (canActOnStep(user?.role, currentStep.approverRole) || !!delegatorMatch);
   const canOrder = isPurchasing && data.status === "approved";
   const canReceive = isPurchasing && data.status === "ordered";
   const canSubmit = data.status === "draft" && data.requesterId === user?.id;
@@ -261,6 +271,11 @@ export default function RequestDetail() {
                 <p className="text-xs text-muted-foreground">
                   Freigabestufe {currentStep.stepOrder} · {ROLE_LABELS[currentStep.approverRole] ?? currentStep.approverRole}
                 </p>
+                {decidingAsDelegate && delegatorMatch && (
+                  <p className="text-xs text-primary" data-testid="text-deciding-as-delegate">
+                    Du entscheidest hier als Vertretung für {delegatorMatch.name}.
+                  </p>
+                )}
                 <Textarea
                   placeholder="Kommentar (optional)"
                   value={comment}
@@ -389,6 +404,11 @@ export default function RequestDetail() {
                       {step.decidedById != null && (
                         <p className="text-muted-foreground text-xs mt-0.5">
                           {userName(step.decidedById) ?? "Unbekannt"} · {formatDateTime(step.decidedAt)}
+                        </p>
+                      )}
+                      {step.decidedOnBehalfOfId != null && (
+                        <p className="text-muted-foreground text-xs mt-0.5" data-testid={`text-on-behalf-of-${step.stepOrder}`}>
+                          Vertretung für {userName(step.decidedOnBehalfOfId) ?? "Unbekannt"}
                         </p>
                       )}
                       {step.comment && <p className="text-muted-foreground text-xs mt-0.5">{step.comment}</p>}

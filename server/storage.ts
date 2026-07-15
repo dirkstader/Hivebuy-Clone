@@ -1,7 +1,7 @@
 import {
   users, costCenters, suppliers, catalogItems, purchaseRequests, requestLineItems,
   purchaseOrders, invoices, activityLog, punchoutSessions, approvalSteps,
-  goodsReceipts, goodsReceiptLines, budgetCommitments, budgetPeriods,
+  goodsReceipts, goodsReceiptLines, budgetCommitments, budgetPeriods, approvalDelegations,
 } from '@shared/schema';
 import type {
   User, InsertUser, CostCenter, InsertCostCenter, Supplier, InsertSupplier,
@@ -11,7 +11,7 @@ import type {
   PunchoutSession, InsertPunchoutSession, ApprovalStep, InsertApprovalStep,
   GoodsReceipt, InsertGoodsReceipt, GoodsReceiptLine, InsertGoodsReceiptLine,
   BudgetCommitment, InsertBudgetCommitment, BudgetPeriod, InsertBudgetPeriod,
-  CostCenterWithPeriod,
+  CostCenterWithPeriod, ApprovalDelegation, InsertApprovalDelegation,
 } from '@shared/schema';
 import { and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -95,6 +95,12 @@ export interface IStorage {
   listApprovalSteps(requestId: number): Promise<ApprovalStep[]>;
   createApprovalStep(s: InsertApprovalStep): Promise<ApprovalStep>;
   updateApprovalStep(id: number, s: Partial<InsertApprovalStep>): Promise<ApprovalStep | undefined>;
+
+  // Approval delegations (Freigabe-Vertretung)
+  getApprovalDelegationByDelegator(delegatorId: number): Promise<ApprovalDelegation | undefined>;
+  listApprovalDelegationsByDelegate(delegateId: number): Promise<ApprovalDelegation[]>;
+  upsertApprovalDelegation(d: InsertApprovalDelegation): Promise<ApprovalDelegation>;
+  deleteApprovalDelegationByDelegator(delegatorId: number): Promise<void>;
 
   // Budget commitments (Obligo)
   createBudgetCommitment(c: InsertBudgetCommitment): Promise<BudgetCommitment>;
@@ -260,6 +266,22 @@ export class DatabaseStorage implements IStorage {
   async createApprovalStep(s: InsertApprovalStep) { return db.insert(approvalSteps).values(s).returning().get(); }
   async updateApprovalStep(id: number, s: Partial<InsertApprovalStep>) {
     return db.update(approvalSteps).set(s).where(eq(approvalSteps.id, id)).returning().get();
+  }
+
+  async getApprovalDelegationByDelegator(delegatorId: number) {
+    return db.select().from(approvalDelegations).where(eq(approvalDelegations.delegatorId, delegatorId)).get();
+  }
+  async listApprovalDelegationsByDelegate(delegateId: number) {
+    return db.select().from(approvalDelegations).where(eq(approvalDelegations.delegateId, delegateId)).all();
+  }
+  // "Set" semantics: a delegator has at most one active delegation, so setting a new one
+  // replaces whatever was there (matches the unique index on delegatorId).
+  async upsertApprovalDelegation(d: InsertApprovalDelegation) {
+    db.delete(approvalDelegations).where(eq(approvalDelegations.delegatorId, d.delegatorId)).run();
+    return db.insert(approvalDelegations).values(d).returning().get();
+  }
+  async deleteApprovalDelegationByDelegator(delegatorId: number) {
+    db.delete(approvalDelegations).where(eq(approvalDelegations.delegatorId, delegatorId)).run();
   }
 
   async createGoodsReceipt(r: InsertGoodsReceipt) { return db.insert(goodsReceipts).values(r).returning().get(); }

@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
-import { apiRequest, setAuthToken, setUnauthorizedHandler } from "./queryClient";
+import { apiRequest, queryClient, setAuthToken, setUnauthorizedHandler } from "./queryClient";
 import type { User } from "@shared/schema";
 
 // All demo-seeded users share this password (see server/seed.ts / README).
@@ -24,6 +24,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const clearSession = useCallback(() => {
     setAuthToken(null);
     setUser(null);
+    // All queries are keyed without a user id (there's no per-user cache segmentation), so
+    // switching to a different account without a page reload — logout, or the demo-user
+    // switcher on the login page — must drop every cached response. Otherwise the next
+    // user briefly sees the previous user's data for anything already in the cache.
+    queryClient.clear();
   }, []);
 
   useEffect(() => {
@@ -73,6 +78,6 @@ export function useAuth() {
 export const ROLE_LABELS: Record<string, string> = {
   requester: "Antragsteller",
   approver: "Genehmiger",
-  purchasing: "Einkauf/Admin",
+  purchasing: "Admin",
   finance: "Finance/Controlling",
 };

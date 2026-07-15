@@ -199,5 +199,14 @@ export async function seedIfEmpty() {
   await storage.createActivity({ entityType: "request", entityId: r4.id, actorId: admin.id, action: "approved", note: "Dringend, bitte sofort bestellen.", createdAt: daysAgo(21) });
   await storage.createActivity({ entityType: "invoice", entityId: 2, actorId: purchasing.id, action: "flagged", note: "Abweichung zum Bestellwert festgestellt.", createdAt: daysAgo(3) });
 
+  // Sabine is on leave and has delegated her approval authority to Jana (Einkauf/Admin) for
+  // the next few days — demonstrates the "borrowed authority" delegation model on r1, which
+  // is still awaiting an approver-step decision.
+  await storage.upsertApprovalDelegation({
+    delegatorId: approver1.id, delegateId: purchasing.id,
+    startsAt: daysAgo(2), endsAt: daysAgo(-5),
+    note: "Urlaubsvertretung", createdAt: daysAgo(2),
+  });
+
   console.log("[seed] Demo data ready.");
 }
