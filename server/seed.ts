@@ -1,6 +1,19 @@
 import { storage } from "./storage";
 import { PYLO_COST_CENTERS, PYLO_CATALOG_ITEMS } from "./pylo-data";
 
+// Creates a cost center plus its FY2026 active budget period in one call — cost centers no
+// longer carry budget/spent/committed themselves (see shared/schema.ts budgetPeriods).
+async function createCostCenterWithPeriod(cc: { name: string; code: string; owner: string; city: string; annualBudget: number; spent: number }) {
+  const created = await storage.createCostCenter({ name: cc.name, code: cc.code, owner: cc.owner, city: cc.city });
+  const now = new Date().toISOString();
+  await storage.createBudgetPeriod({
+    costCenterId: created.id, fiscalYear: 2026, budget: cc.annualBudget, spent: cc.spent, committed: 0,
+    startsAt: "2026-01-01T00:00:00.000Z", endsAt: "2027-01-01T00:00:00.000Z",
+    status: "active", createdAt: now,
+  });
+  return created;
+}
+
 export async function seedIfEmpty() {
   const users = await storage.listUsers();
   if (users.length > 0) return;
@@ -9,16 +22,7 @@ export async function seedIfEmpty() {
 
   // Cost centers = echte Betriebe/Standorte aus der Pylo-Datenbank (106 aktive Filialen, Geschlossene ausgeschlossen)
   const pyloCostCenters = await Promise.all(
-    PYLO_COST_CENTERS.map((cc) =>
-      storage.createCostCenter({
-        name: cc.name,
-        code: cc.code,
-        owner: cc.owner,
-        city: cc.city,
-        annualBudget: cc.annualBudget,
-        spent: cc.spent,
-      })
-    )
+    PYLO_COST_CENTERS.map((cc) => createCostCenterWithPeriod(cc))
   );
   const ccByCode = new Map(pyloCostCenters.map((cc) => [cc.code, cc]));
   const ccHQ = pyloCostCenters.find((cc) => cc.name.includes("Verwaltung")) ?? pyloCostCenters[0];
@@ -176,12 +180,18 @@ export async function seedIfEmpty() {
   // Budget: approved-but-not-invoiced requests reserve budget (Obligo); invoiced ones are
   // realized as actual spend. r3 (approved) and r4 (ordered, invoice still in discrepancy)
   // stay reserved; r5 (received, matched invoice) is realized.
-  await storage.createBudgetCommitment({ costCenterId: ccFiliale1.id, requestId: r3.id, amount: 2808.0, status: "reserved", createdAt: daysAgo(12), resolvedAt: null });
-  await storage.updateCostCenterCommitted(ccFiliale1.id, 2808.0);
-  await storage.createBudgetCommitment({ costCenterId: ccIT.id, requestId: r4.id, amount: 1780.0, status: "reserved", createdAt: daysAgo(21), resolvedAt: null });
-  await storage.updateCostCenterCommitted(ccIT.id, 1780.0);
-  await storage.createBudgetCommitment({ costCenterId: ccIT.id, requestId: r5.id, amount: 1674.0, status: "realized", createdAt: daysAgo(33), resolvedAt: daysAgo(24) });
-  await storage.updateCostCenterSpent(ccIT.id, 1674.0);
+  const periodFiliale1 = await storage.getActivePeriod(ccFiliale1.id);
+  const periodIT = await storage.getActivePeriod(ccIT.id);
+  if (periodFiliale1) {
+    await storage.createBudgetCommitment({ costCenterId: ccFiliale1.id, periodId: periodFiliale1.id, requestId: r3.id, amount: 2808.0, status: "reserved", createdAt: daysAgo(12), resolvedAt: null });
+    await storage.updatePeriodCommitted(periodFiliale1.id, 2808.0);
+  }
+  if (periodIT) {
+    await storage.createBudgetCommitment({ costCenterId: ccIT.id, periodId: periodIT.id, requestId: r4.id, amount: 1780.0, status: "reserved", createdAt: daysAgo(21), resolvedAt: null });
+    await storage.updatePeriodCommitted(periodIT.id, 1780.0);
+    await storage.createBudgetCommitment({ costCenterId: ccIT.id, periodId: periodIT.id, requestId: r5.id, amount: 1674.0, status: "realized", createdAt: daysAgo(33), resolvedAt: daysAgo(24) });
+    await storage.updatePeriodSpent(periodIT.id, 1674.0);
+  }
 
   // Activity log
   await storage.createActivity({ entityType: "request", entityId: r3.id, actorId: approver1.id, action: "approved", note: "Freigegeben, Budget deckt Bestellung.", createdAt: daysAgo(12) });

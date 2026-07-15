@@ -1,7 +1,7 @@
 import {
   users, costCenters, suppliers, catalogItems, purchaseRequests, requestLineItems,
   purchaseOrders, invoices, activityLog, punchoutSessions, approvalSteps,
-  goodsReceipts, goodsReceiptLines, budgetCommitments,
+  goodsReceipts, goodsReceiptLines, budgetCommitments, budgetPeriods,
 } from '@shared/schema';
 import type {
   User, InsertUser, CostCenter, InsertCostCenter, Supplier, InsertSupplier,
@@ -10,7 +10,8 @@ import type {
   Invoice, InsertInvoice, ActivityLog, InsertActivityLog,
   PunchoutSession, InsertPunchoutSession, ApprovalStep, InsertApprovalStep,
   GoodsReceipt, InsertGoodsReceipt, GoodsReceiptLine, InsertGoodsReceiptLine,
-  BudgetCommitment, InsertBudgetCommitment,
+  BudgetCommitment, InsertBudgetCommitment, BudgetPeriod, InsertBudgetPeriod,
+  CostCenterWithPeriod,
 } from '@shared/schema';
 import { and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -40,9 +41,19 @@ export interface IStorage {
   listCostCenters(): Promise<CostCenter[]>;
   getCostCenter(id: number): Promise<CostCenter | undefined>;
   createCostCenter(cc: InsertCostCenter): Promise<CostCenter>;
-  updateCostCenterSpent(id: number, delta: number): Promise<void>;
-  updateCostCenterCommitted(id: number, delta: number): Promise<void>;
   deleteCostCenter(id: number): Promise<void>;
+
+  // Budget periods (Geschäftsjahre)
+  listCostCentersWithActivePeriod(): Promise<CostCenterWithPeriod[]>;
+  listBudgetPeriods(costCenterId: number): Promise<BudgetPeriod[]>;
+  getActivePeriod(costCenterId: number): Promise<BudgetPeriod | undefined>;
+  getBudgetPeriod(id: number): Promise<BudgetPeriod | undefined>;
+  createBudgetPeriod(p: InsertBudgetPeriod): Promise<BudgetPeriod>;
+  updatePeriodSpent(id: number, delta: number): Promise<void>;
+  updatePeriodCommitted(id: number, delta: number): Promise<void>;
+  // Closes the cost center's active period and opens a new one for the next fiscal year,
+  // carrying over any still-open (reserved) commitments so in-flight requests aren't dropped.
+  rolloverCostCenterPeriod(costCenterId: number, newBudget: number): Promise<BudgetPeriod>;
 
   // Suppliers
   listSuppliers(): Promise<Supplier[]>;
@@ -119,17 +130,72 @@ export class DatabaseStorage implements IStorage {
   async listCostCenters() { return db.select().from(costCenters).all(); }
   async getCostCenter(id: number) { return db.select().from(costCenters).where(eq(costCenters.id, id)).get(); }
   async createCostCenter(cc: InsertCostCenter) { return db.insert(costCenters).values(cc).returning().get(); }
-  async updateCostCenterSpent(id: number, delta: number) {
-    const cc = await this.getCostCenter(id);
-    if (!cc) return;
-    db.update(costCenters).set({ spent: cc.spent + delta }).where(eq(costCenters.id, id)).run();
-  }
-  async updateCostCenterCommitted(id: number, delta: number) {
-    const cc = await this.getCostCenter(id);
-    if (!cc) return;
-    db.update(costCenters).set({ committed: Math.max(0, cc.committed + delta) }).where(eq(costCenters.id, id)).run();
-  }
   async deleteCostCenter(id: number) { db.delete(costCenters).where(eq(costCenters.id, id)).run(); }
+
+  async listCostCentersWithActivePeriod(): Promise<CostCenterWithPeriod[]> {
+    const centers = await this.listCostCenters();
+    const withPeriod = await Promise.all(centers.map(async (c) => {
+      const period = await this.getActivePeriod(c.id);
+      if (!period) return null;
+      return {
+        ...c,
+        periodId: period.id, fiscalYear: period.fiscalYear,
+        annualBudget: period.budget, spent: period.spent, committed: period.committed,
+        periodStartsAt: period.startsAt, periodEndsAt: period.endsAt,
+      };
+    }));
+    return withPeriod.filter((c): c is CostCenterWithPeriod => c !== null);
+  }
+  async listBudgetPeriods(costCenterId: number) {
+    return db.select().from(budgetPeriods)
+      .where(eq(budgetPeriods.costCenterId, costCenterId))
+      .orderBy(desc(budgetPeriods.fiscalYear))
+      .all();
+  }
+  async getActivePeriod(costCenterId: number) {
+    return db.select().from(budgetPeriods)
+      .where(and(eq(budgetPeriods.costCenterId, costCenterId), eq(budgetPeriods.status, "active")))
+      .get();
+  }
+  async getBudgetPeriod(id: number) { return db.select().from(budgetPeriods).where(eq(budgetPeriods.id, id)).get(); }
+  async createBudgetPeriod(p: InsertBudgetPeriod) { return db.insert(budgetPeriods).values(p).returning().get(); }
+  async updatePeriodSpent(id: number, delta: number) {
+    const p = await this.getBudgetPeriod(id);
+    if (!p) return;
+    db.update(budgetPeriods).set({ spent: p.spent + delta }).where(eq(budgetPeriods.id, id)).run();
+  }
+  async updatePeriodCommitted(id: number, delta: number) {
+    const p = await this.getBudgetPeriod(id);
+    if (!p) return;
+    db.update(budgetPeriods).set({ committed: Math.max(0, p.committed + delta) }).where(eq(budgetPeriods.id, id)).run();
+  }
+  async rolloverCostCenterPeriod(costCenterId: number, newBudget: number) {
+    const old = await this.getActivePeriod(costCenterId);
+    if (!old) throw new Error("Keine aktive Budgetperiode für diese Kostenstelle vorhanden.");
+
+    const openCommitments = await db.select().from(budgetCommitments)
+      .where(and(eq(budgetCommitments.periodId, old.id), eq(budgetCommitments.status, "reserved")))
+      .all();
+    const carriedCommitted = openCommitments.reduce((sum, c) => sum + c.amount, 0);
+
+    const now = new Date().toISOString();
+    const next = await this.createBudgetPeriod({
+      costCenterId, fiscalYear: old.fiscalYear + 1, budget: newBudget,
+      spent: 0, committed: carriedCommitted,
+      startsAt: `${old.fiscalYear + 1}-01-01T00:00:00.000Z`,
+      endsAt: `${old.fiscalYear + 2}-01-01T00:00:00.000Z`,
+      status: "active", createdAt: now,
+    });
+
+    db.update(budgetCommitments)
+      .set({ periodId: next.id })
+      .where(and(eq(budgetCommitments.periodId, old.id), eq(budgetCommitments.status, "reserved")))
+      .run();
+
+    db.update(budgetPeriods).set({ status: "closed", committed: 0 }).where(eq(budgetPeriods.id, old.id)).run();
+
+    return next;
+  }
 
   async createBudgetCommitment(c: InsertBudgetCommitment) { return db.insert(budgetCommitments).values(c).returning().get(); }
   async getReservedCommitmentByRequest(requestId: number) {

@@ -20,22 +20,62 @@ export const insertUserSchema = createInsertSchema(users).omit({ id: true });
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
 
-// ---------- Cost Centers & Budgets ----------
+// ---------- Cost Centers (identity only — budgets live in budgetPeriods) ----------
 export const costCenters = sqliteTable("cost_centers", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull(),
   code: text("code").notNull().unique(),
   owner: text("owner").notNull().default(""),
   city: text("city").notNull().default(""),
-  annualBudget: real("annual_budget").notNull().default(0),
-  spent: real("spent").notNull().default(0),
-  // Reserved-but-not-yet-invoiced amount (Obligo): rises on approval, released on invoicing.
-  committed: real("committed").notNull().default(0),
 });
 
 export const insertCostCenterSchema = createInsertSchema(costCenters).omit({ id: true });
 export type InsertCostCenter = z.infer<typeof insertCostCenterSchema>;
 export type CostCenter = typeof costCenters.$inferSelect;
+
+// The creation request also seeds the cost center's first budget period — annualBudget isn't
+// a column on costCenters itself, so it's not part of insertCostCenterSchema.
+export const createCostCenterRequestSchema = insertCostCenterSchema.extend({
+  annualBudget: z.number().nonnegative(),
+});
+
+// ---------- Budget Periods (Geschäftsjahre) ----------
+// A cost center's budget/spent/committed numbers are scoped to a fiscal year instead of being
+// a single perpetual bucket. Exactly one period per cost center is "active" at a time — moving
+// to a new fiscal year is a manual finance action (rolloverCostCenterPeriod in storage.ts), not
+// date-driven, since there is no scheduler in this app.
+export const PERIOD_STATUSES = ["active", "closed"] as const;
+export type PeriodStatus = (typeof PERIOD_STATUSES)[number];
+
+export const budgetPeriods = sqliteTable("budget_periods", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  costCenterId: integer("cost_center_id").notNull(),
+  fiscalYear: integer("fiscal_year").notNull(),
+  budget: real("budget").notNull().default(0),
+  spent: real("spent").notNull().default(0),
+  // Reserved-but-not-yet-invoiced amount (Obligo): rises on approval, released on invoicing.
+  committed: real("committed").notNull().default(0),
+  startsAt: text("starts_at").notNull(),
+  endsAt: text("ends_at").notNull(),
+  status: text("status").notNull().default("active"), // active | closed
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertBudgetPeriodSchema = createInsertSchema(budgetPeriods).omit({ id: true });
+export type InsertBudgetPeriod = z.infer<typeof insertBudgetPeriodSchema>;
+export type BudgetPeriod = typeof budgetPeriods.$inferSelect;
+
+// Composed shape returned by the cost-centers list/detail endpoints: flattens the active
+// period's numbers onto the historical field names so dashboard/analytics JSON is unchanged.
+export interface CostCenterWithPeriod extends CostCenter {
+  periodId: number;
+  fiscalYear: number;
+  annualBudget: number;
+  spent: number;
+  committed: number;
+  periodStartsAt: string;
+  periodEndsAt: string;
+}
 
 // ---------- Suppliers ----------
 export const suppliers = sqliteTable("suppliers", {
@@ -195,6 +235,10 @@ export type CommitmentStatus = (typeof COMMITMENT_STATUSES)[number];
 export const budgetCommitments = sqliteTable("budget_commitments", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   costCenterId: integer("cost_center_id").notNull(),
+  // Which fiscal year this reservation/spend belongs to — stamped at reservation time and kept
+  // even if the cost center rolls over to a new period before the invoice arrives, so an
+  // approved-but-not-yet-invoiced request never silently drops out of budget tracking.
+  periodId: integer("period_id").notNull(),
   requestId: integer("request_id").notNull(),
   amount: real("amount").notNull().default(0),
   status: text("status").notNull().default("reserved"),

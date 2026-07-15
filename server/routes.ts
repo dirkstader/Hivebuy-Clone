@@ -9,7 +9,7 @@ import { AMAZON_CATALOG } from "./amazon-catalog";
 import { verifyPassword } from "./password";
 import { createSession, destroySession, requireAuth, requireRole, sanitizeUser } from "./auth";
 import {
-  insertUserSchema, insertCostCenterSchema, insertSupplierSchema, insertCatalogItemSchema,
+  insertUserSchema, createCostCenterRequestSchema, insertSupplierSchema, insertCatalogItemSchema,
   insertPurchaseRequestSchema, insertRequestLineItemSchema, insertPurchaseOrderSchema, insertInvoiceSchema,
   insertPunchoutSessionSchema,
 } from "@shared/schema";
@@ -120,15 +120,53 @@ export async function registerRoutes(
   // ---------- Everything below requires a valid session ----------
   app.use("/api", requireAuth);
 
-  // ---------- Cost centers ----------
+  // ---------- Cost centers & budget periods (Geschäftsjahre) ----------
   app.get("/api/cost-centers", async (_req, res) => {
-    res.json(await storage.listCostCenters());
+    res.json(await storage.listCostCentersWithActivePeriod());
   });
 
   app.post("/api/cost-centers", requireRole("finance"), async (req, res) => {
-    const parsed = insertCostCenterSchema.safeParse(req.body);
+    const parsed = createCostCenterRequestSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
-    res.status(201).json(await storage.createCostCenter(parsed.data));
+
+    const { annualBudget, ...ccData } = parsed.data;
+    const cc = await storage.createCostCenter(ccData);
+    const year = new Date().getFullYear();
+    const now = new Date().toISOString();
+    await storage.createBudgetPeriod({
+      costCenterId: cc.id, fiscalYear: year, budget: annualBudget, spent: 0, committed: 0,
+      startsAt: `${year}-01-01T00:00:00.000Z`, endsAt: `${year + 1}-01-01T00:00:00.000Z`,
+      status: "active", createdAt: now,
+    });
+
+    const withPeriod = (await storage.listCostCentersWithActivePeriod()).find((c) => c.id === cc.id);
+    res.status(201).json(withPeriod);
+  });
+
+  app.get("/api/cost-centers/:id/periods", async (req, res) => {
+    res.json(await storage.listBudgetPeriods(Number(req.params.id)));
+  });
+
+  // Manually close out the cost center's fiscal year and open the next one. Still-open
+  // (reserved) commitments carry over to the new period so in-flight requests whose invoice
+  // arrives after year-end don't silently drop out of budget tracking.
+  app.post("/api/cost-centers/:id/periods", requireRole("finance"), async (req, res) => {
+    const id = Number(req.params.id);
+    const cc = await storage.getCostCenter(id);
+    if (!cc) return res.status(404).json({ message: "Kostenstelle nicht gefunden." });
+
+    const parsed = z.object({ budget: z.number().nonnegative() }).safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+
+    const active = await storage.getActivePeriod(id);
+    if (!active) return res.status(409).json({ message: "Keine aktive Budgetperiode für diese Kostenstelle vorhanden." });
+
+    const next = await storage.rolloverCostCenterPeriod(id, parsed.data.budget);
+    await storage.createActivity({
+      entityType: "cost_center", entityId: id, actorId: req.user!.id,
+      action: "rollover", note: `Geschäftsjahr ${next.fiscalYear} eröffnet.`, createdAt: new Date().toISOString(),
+    });
+    res.status(201).json(next);
   });
 
   // ---------- Suppliers ----------
@@ -367,11 +405,14 @@ export async function registerRoutes(
         status: "approved", approverId: actor.id, approverComment: comment, decidedAt: now,
       });
       if (updated) {
-        await storage.createBudgetCommitment({
-          costCenterId: updated.costCenterId, requestId: updated.id, amount: updated.totalAmount,
-          status: "reserved", createdAt: now, resolvedAt: null,
-        });
-        await storage.updateCostCenterCommitted(updated.costCenterId, updated.totalAmount);
+        const period = await storage.getActivePeriod(updated.costCenterId);
+        if (period) {
+          await storage.createBudgetCommitment({
+            costCenterId: updated.costCenterId, periodId: period.id, requestId: updated.id,
+            amount: updated.totalAmount, status: "reserved", createdAt: now, resolvedAt: null,
+          });
+          await storage.updatePeriodCommitted(period.id, updated.totalAmount);
+        }
       }
     } else {
       // More steps remain — record the interim approval but keep the request pending.
@@ -521,8 +562,8 @@ export async function registerRoutes(
       const commitment = await storage.getReservedCommitmentByRequest(order.requestId);
       if (commitment) {
         await storage.updateBudgetCommitment(commitment.id, { status: "realized", resolvedAt: new Date().toISOString() });
-        await storage.updateCostCenterCommitted(commitment.costCenterId, -commitment.amount);
-        await storage.updateCostCenterSpent(commitment.costCenterId, amount);
+        await storage.updatePeriodCommitted(commitment.periodId, -commitment.amount);
+        await storage.updatePeriodSpent(commitment.periodId, amount);
       }
     }
 
@@ -584,7 +625,7 @@ export async function registerRoutes(
       storage.listPurchaseRequests(),
       storage.listPurchaseOrders(),
       storage.listInvoices(),
-      storage.listCostCenters(),
+      storage.listCostCentersWithActivePeriod(),
       storage.listSuppliers(),
     ]);
 
@@ -609,7 +650,7 @@ export async function registerRoutes(
     const [requests, invoices, costCenters, suppliers] = await Promise.all([
       storage.listPurchaseRequests(),
       storage.listInvoices(),
-      storage.listCostCenters(),
+      storage.listCostCentersWithActivePeriod(),
       storage.listSuppliers(),
     ]);
 
