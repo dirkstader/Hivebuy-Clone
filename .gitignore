@@ -8,6 +8,9 @@ data.db-shm
 data.db-wal
 data.db-journal
 
+# Uploaded attachments — never commit; local dev/demo files only
+uploads/
+
 .env
 .env.*
 !.env.example

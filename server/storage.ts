@@ -2,6 +2,7 @@ import {
   users, costCenters, suppliers, catalogItems, purchaseRequests, requestLineItems,
   purchaseOrders, invoices, activityLog, punchoutSessions, approvalSteps,
   goodsReceipts, goodsReceiptLines, budgetCommitments, budgetPeriods, approvalDelegations,
+  attachments,
 } from '@shared/schema';
 import type {
   User, InsertUser, CostCenter, InsertCostCenter, Supplier, InsertSupplier,
@@ -12,6 +13,7 @@ import type {
   GoodsReceipt, InsertGoodsReceipt, GoodsReceiptLine, InsertGoodsReceiptLine,
   BudgetCommitment, InsertBudgetCommitment, BudgetPeriod, InsertBudgetPeriod,
   CostCenterWithPeriod, ApprovalDelegation, InsertApprovalDelegation,
+  Attachment, InsertAttachment,
 } from '@shared/schema';
 import { and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -118,6 +120,12 @@ export interface IStorage {
   // Activity log
   listActivity(entityType: string, entityId: number): Promise<ActivityLog[]>;
   createActivity(a: InsertActivityLog): Promise<ActivityLog>;
+
+  // Attachments (Datei-Anhänge)
+  createAttachment(a: InsertAttachment): Promise<Attachment>;
+  listAttachments(entityType: string, entityId: number): Promise<Attachment[]>;
+  getAttachment(id: number): Promise<Attachment | undefined>;
+  deleteAttachment(id: number): Promise<void>;
 
   // Amazon Business punch-out sessions
   createPunchoutSession(p: InsertPunchoutSession): Promise<PunchoutSession>;
@@ -311,6 +319,15 @@ export class DatabaseStorage implements IStorage {
       .filter(a => a.entityId === entityId);
   }
   async createActivity(a: InsertActivityLog) { return db.insert(activityLog).values(a).returning().get(); }
+
+  async createAttachment(a: InsertAttachment) { return db.insert(attachments).values(a).returning().get(); }
+  async listAttachments(entityType: string, entityId: number) {
+    return db.select().from(attachments)
+      .where(and(eq(attachments.entityType, entityType), eq(attachments.entityId, entityId)))
+      .all();
+  }
+  async getAttachment(id: number) { return db.select().from(attachments).where(eq(attachments.id, id)).get(); }
+  async deleteAttachment(id: number) { db.delete(attachments).where(eq(attachments.id, id)).run(); }
 
   async createPunchoutSession(p: InsertPunchoutSession) { return db.insert(punchoutSessions).values(p).returning().get(); }
   async getPunchoutSession(id: number) { return db.select().from(punchoutSessions).where(eq(punchoutSessions.id, id)).get(); }

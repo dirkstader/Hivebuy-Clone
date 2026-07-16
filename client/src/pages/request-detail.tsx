@@ -14,6 +14,7 @@ import {
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth, ROLE_LABELS } from "@/lib/auth-context";
+import { AttachmentsPanel } from "@/components/attachments-panel";
 import {
   formatCurrency, formatDate, formatDateTime, REQUEST_STATUS_LABELS, statusBadgeVariant,
 } from "@/lib/format";
@@ -38,6 +39,8 @@ const ACTION_LABELS: Record<string, string> = {
   ordered: "Bestellung ausgelöst",
   received: "Wareneingang gebucht",
   closed: "Abgeschlossen",
+  attachment_added: "Anhang hochgeladen",
+  attachment_removed: "Anhang gelöscht",
 };
 
 // Mirrors canActOnStep in server/routes.ts — finance covers every step, approver only
@@ -239,6 +242,15 @@ export default function RequestDetail() {
               </tbody>
             </table>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm">Anhänge</CardTitle>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <AttachmentsPanel entityType="request" entityId={data.id} />
         </CardContent>
       </Card>
 

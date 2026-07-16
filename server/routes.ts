@@ -1,6 +1,7 @@
-import type { Express } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
+import fs from "node:fs";
 import { z } from "zod";
 import rateLimit from "express-rate-limit";
 import { storage } from "./storage";
@@ -8,6 +9,7 @@ import { seedIfEmpty } from "./seed";
 import { AMAZON_CATALOG } from "./amazon-catalog";
 import { verifyPassword } from "./password";
 import { createSession, destroySession, requireAuth, requireRole, sanitizeUser } from "./auth";
+import { upload, attachmentPath } from "./uploads";
 import type { User } from "@shared/schema";
 import {
   insertUserSchema, createCostCenterRequestSchema, insertSupplierSchema, insertCatalogItemSchema,
@@ -616,6 +618,76 @@ export async function registerRoutes(
     const updated = await storage.updateInvoice(Number(req.params.id), parsed.data);
     if (!updated) return res.status(404).json({ message: "Rechnung nicht gefunden." });
     res.json(updated);
+  });
+
+  // ---------- Attachments (Datei-Anhänge) ----------
+  // Multer reports bad-file-type/too-large errors via its own callback rather than throwing —
+  // wrap it so those land as a normal 4xx JSON response instead of falling through to the
+  // generic 500 error handler in server/index.ts.
+  function handleUpload(req: Request, res: Response, next: NextFunction) {
+    upload.single("file")(req, res, (err: unknown) => {
+      if (err) return res.status(400).json({ message: err instanceof Error ? err.message : "Datei-Upload fehlgeschlagen." });
+      next();
+    });
+  }
+
+  const ATTACHMENT_PARENTS: Record<string, { getParent: (id: number) => Promise<unknown>; notFoundMessage: string }> = {
+    request: { getParent: (id) => storage.getPurchaseRequest(id), notFoundMessage: "Bestellanforderung nicht gefunden." },
+    order: { getParent: (id) => storage.getPurchaseOrder(id), notFoundMessage: "Bestellung nicht gefunden." },
+    invoice: { getParent: (id) => storage.getInvoice(id), notFoundMessage: "Rechnung nicht gefunden." },
+  };
+
+  function registerAttachmentRoutes(entityType: keyof typeof ATTACHMENT_PARENTS, routePrefix: string) {
+    const { getParent, notFoundMessage } = ATTACHMENT_PARENTS[entityType];
+
+    app.get(`/api/${routePrefix}/:id/attachments`, async (req, res) => {
+      const entityId = Number(req.params.id);
+      if (!(await getParent(entityId))) return res.status(404).json({ message: notFoundMessage });
+      res.json(await storage.listAttachments(entityType, entityId));
+    });
+
+    app.post(`/api/${routePrefix}/:id/attachments`, handleUpload, async (req, res) => {
+      const entityId = Number(req.params.id);
+      if (!(await getParent(entityId))) return res.status(404).json({ message: notFoundMessage });
+      if (!req.file) return res.status(400).json({ message: "Keine Datei übermittelt." });
+
+      const now = new Date().toISOString();
+      const attachment = await storage.createAttachment({
+        entityType, entityId, filename: req.file.originalname, storedName: req.file.filename,
+        mimeType: req.file.mimetype, size: req.file.size, uploadedById: req.user!.id, createdAt: now,
+      });
+      await storage.createActivity({
+        entityType, entityId, actorId: req.user!.id, action: "attachment_added",
+        note: req.file.originalname, createdAt: now,
+      });
+      res.status(201).json(attachment);
+    });
+  }
+
+  registerAttachmentRoutes("request", "purchase-requests");
+  registerAttachmentRoutes("order", "purchase-orders");
+  registerAttachmentRoutes("invoice", "invoices");
+
+  app.get("/api/attachments/:id/download", async (req, res) => {
+    const attachment = await storage.getAttachment(Number(req.params.id));
+    if (!attachment) return res.status(404).json({ message: "Anhang nicht gefunden." });
+    res.download(attachmentPath(attachment.storedName), attachment.filename);
+  });
+
+  app.delete("/api/attachments/:id", async (req, res) => {
+    const attachment = await storage.getAttachment(Number(req.params.id));
+    if (!attachment) return res.status(404).json({ message: "Anhang nicht gefunden." });
+    const isPurchasing = (PURCHASING_ROLES as readonly string[]).includes(req.user!.role);
+    if (attachment.uploadedById !== req.user!.id && !isPurchasing) {
+      return res.status(403).json({ message: "Für das Löschen dieses Anhangs fehlt die Berechtigung." });
+    }
+    fs.unlink(attachmentPath(attachment.storedName), () => {});
+    await storage.deleteAttachment(attachment.id);
+    await storage.createActivity({
+      entityType: attachment.entityType, entityId: attachment.entityId, actorId: req.user!.id,
+      action: "attachment_removed", note: attachment.filename, createdAt: new Date().toISOString(),
+    });
+    res.status(204).end();
   });
 
   // ---------- Amazon Business Punch-Out (simulated cXML/OCI) ----------

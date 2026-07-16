@@ -323,6 +323,30 @@ export const insertApprovalDelegationSchema = createInsertSchema(approvalDelegat
 export type InsertApprovalDelegation = z.infer<typeof insertApprovalDelegationSchema>;
 export type ApprovalDelegation = typeof approvalDelegations.$inferSelect;
 
+// ---------- Attachments (Datei-Anhänge) ----------
+// Polymorphic like activityLog: entityType/entityId identify the parent (a request, order, or
+// invoice). Files live on disk under UPLOADS_DIR (see server/uploads.ts) — storedName is the
+// random on-disk filename (never client-controlled), filename is the original name shown/
+// downloaded to the user.
+export const ATTACHMENT_ENTITY_TYPES = ["request", "order", "invoice"] as const;
+export type AttachmentEntityType = (typeof ATTACHMENT_ENTITY_TYPES)[number];
+
+export const attachments = sqliteTable("attachments", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  entityType: text("entity_type").notNull(),
+  entityId: integer("entity_id").notNull(),
+  filename: text("filename").notNull(),
+  storedName: text("stored_name").notNull(),
+  mimeType: text("mime_type").notNull(),
+  size: integer("size").notNull(),
+  uploadedById: integer("uploaded_by_id"),
+  createdAt: text("created_at").notNull(),
+});
+
+export const insertAttachmentSchema = createInsertSchema(attachments).omit({ id: true });
+export type InsertAttachment = z.infer<typeof insertAttachmentSchema>;
+export type Attachment = typeof attachments.$inferSelect;
+
 // ---------- Activity Log (for approvals/audit trail) ----------
 export const activityLog = sqliteTable("activity_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),
