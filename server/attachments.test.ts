@@ -87,4 +87,52 @@ describe("attachments (Datei-Anhänge)", () => {
     const res = await request(app).delete(`/api/attachments/${upload.body.id}`).set(...auth(lea.token));
     expect(res.status).toBe(204);
   });
+
+  it("a requester with no relation to an invoice cannot list, upload to, or download its attachments", async () => {
+    const list = await request(app).get("/api/invoices/1/attachments").set(...auth(lea.token));
+    expect(list.status).toBe(403);
+
+    const upload = await request(app)
+      .post("/api/invoices/1/attachments")
+      .set(...auth(lea.token))
+      .attach("file", Buffer.from("%PDF-1.4"), { filename: "fremde-rechnung.pdf", contentType: "application/pdf" });
+    expect(upload.status).toBe(403);
+
+    const asPurchasing = await request(app)
+      .post("/api/invoices/1/attachments")
+      .set(...auth(jana.token))
+      .attach("file", Buffer.from("%PDF-1.4"), { filename: "beleg.pdf", contentType: "application/pdf" });
+    expect(asPurchasing.status).toBe(201);
+
+    const download = await request(app).get(`/api/attachments/${asPurchasing.body.id}/download`).set(...auth(lea.token));
+    expect(download.status).toBe(403);
+  });
+
+  it("a requester with no relation to a purchase order cannot list or upload to its attachments", async () => {
+    const list = await request(app).get("/api/purchase-orders/1/attachments").set(...auth(lea.token));
+    expect(list.status).toBe(403);
+
+    const upload = await request(app)
+      .post("/api/purchase-orders/1/attachments")
+      .set(...auth(lea.token))
+      .attach("file", Buffer.from("%PDF-1.4"), { filename: "fremde-bestellung.pdf", contentType: "application/pdf" });
+    expect(upload.status).toBe(403);
+  });
+
+  it("request attachments stay broadly viewable, matching how requests themselves are readable app-wide", async () => {
+    // Markus has no relation to Lea's request 1 (not the requester, not purchasing) — this
+    // mirrors the existing convention that GET /api/purchase-requests/:id has no role gate.
+    const markus = await loginAs(app, "markus.vogt@ounda.de");
+    const list = await request(app).get("/api/purchase-requests/1/attachments").set(...auth(markus.token));
+    expect(list.status).toBe(200);
+  });
+
+  it("only the requester (or purchasing/finance) may upload to a request — not an unrelated colleague", async () => {
+    const markus = await loginAs(app, "markus.vogt@ounda.de");
+    const upload = await request(app)
+      .post("/api/purchase-requests/1/attachments")
+      .set(...auth(markus.token))
+      .attach("file", Buffer.from("%PDF-1.4"), { filename: "unbeteiligt.pdf", contentType: "application/pdf" });
+    expect(upload.status).toBe(403);
+  });
 });

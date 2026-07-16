@@ -13,11 +13,38 @@ import {
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Progress } from "@/components/ui/progress";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth-context";
 import { formatCurrency } from "@/lib/format";
 import { insertSupplierSchema, type Supplier, type CatalogItem } from "@shared/schema";
+
+// Response shape of GET /api/suppliers/scorecards — computed on demand server-side from
+// goods-receipt/invoice history, never persisted (see server/routes.ts).
+interface ScorecardEntry {
+  supplierId: number;
+  onTimeRate: number | null;
+  completeRate: number | null;
+  discrepancyRate: number | null;
+  score: number | null;
+  hasData: boolean;
+  sampleOrders: number;
+  sampleInvoices: number;
+  fallbackRating: number;
+}
+
+// Composite-score coloring, mirroring how statusBadgeVariant (@/lib/format) encodes good/bad
+// status: >=90 reads as strong (primary), 70-89 as middling (amber), below as weak (destructive).
+function scoreColorClass(score: number) {
+  if (score >= 90) return "text-primary";
+  if (score >= 70) return "text-amber-600 dark:text-amber-400";
+  return "text-destructive";
+}
+
+function ratePercent(rate: number | null) {
+  return rate != null ? `${Math.round(rate * 100)}%` : "–";
+}
 
 export default function Suppliers() {
   const { user } = useAuth();
@@ -31,6 +58,9 @@ export default function Suppliers() {
     queryKey: ["/api/suppliers", selected?.id],
     enabled: !!selected,
   });
+  const { data: scorecards } = useQuery<ScorecardEntry[]>({ queryKey: ["/api/suppliers/scorecards"] });
+  const scorecardBySupplier = new Map((scorecards ?? []).map((sc) => [sc.supplierId, sc]));
+  const selectedScorecard = selected ? scorecardBySupplier.get(selected.id) : undefined;
 
   const canManage = user?.role === "purchasing" || user?.role === "finance";
 
@@ -133,30 +163,45 @@ export default function Suppliers() {
           {isLoading ? (
             Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-20 w-full" />)
           ) : (
-            (suppliers ?? []).map((s) => (
-              <Card
-                key={s.id}
-                className={`cursor-pointer hover-elevate ${selected?.id === s.id ? "border-primary" : ""}`}
-                onClick={() => setSelected(s)}
-                data-testid={`card-supplier-${s.id}`}
-              >
-                <CardContent className="p-4">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Building2 className="h-4 w-4 text-muted-foreground shrink-0" />
-                      <p className="text-sm font-medium truncate">{s.name}</p>
+            (suppliers ?? []).map((s) => {
+              const scorecard = scorecardBySupplier.get(s.id);
+              return (
+                <Card
+                  key={s.id}
+                  className={`cursor-pointer hover-elevate ${selected?.id === s.id ? "border-primary" : ""}`}
+                  onClick={() => setSelected(s)}
+                  data-testid={`card-supplier-${s.id}`}
+                >
+                  <CardContent className="p-4">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Building2 className="h-4 w-4 text-muted-foreground shrink-0" />
+                        <p className="text-sm font-medium truncate">{s.name}</p>
+                      </div>
+                      <Badge variant={s.status === "active" ? "default" : "outline"}>{s.status === "active" ? "Aktiv" : "Inaktiv"}</Badge>
                     </div>
-                    <Badge variant={s.status === "active" ? "default" : "outline"}>{s.status === "active" ? "Aktiv" : "Inaktiv"}</Badge>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-1">{s.category}</p>
-                  <div className="flex items-center gap-1 mt-2">
-                    {Array.from({ length: 5 }).map((_, i) => (
-                      <Star key={i} className={`h-3 w-3 ${i < s.rating ? "fill-primary text-primary" : "text-muted-foreground"}`} />
-                    ))}
-                  </div>
-                </CardContent>
-              </Card>
-            ))
+                    <p className="text-xs text-muted-foreground mt-1">{s.category}</p>
+                    {scorecard?.hasData ? (
+                      <div className="flex items-center gap-2 mt-2" data-testid={`score-supplier-${s.id}`}>
+                        <span className={`text-sm font-semibold ${scoreColorClass(scorecard.score!)}`}>
+                          {scorecard.score}%
+                        </span>
+                        <span className="text-xs text-muted-foreground">aus {scorecard.sampleOrders} Bestellungen</span>
+                      </div>
+                    ) : (
+                      <div className="mt-2">
+                        <div className="flex items-center gap-1">
+                          {Array.from({ length: 5 }).map((_, i) => (
+                            <Star key={i} className={`h-3 w-3 ${i < s.rating ? "fill-primary text-primary" : "text-muted-foreground"}`} />
+                          ))}
+                        </div>
+                        <p className="text-[11px] text-muted-foreground mt-0.5">Manuelle Einschätzung · keine Bestellhistorie</p>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })
           )}
         </div>
 
@@ -177,6 +222,55 @@ export default function Suppliers() {
                   {selected.address && <p className="text-xs text-muted-foreground">{selected.address}</p>}
                 </CardContent>
               </Card>
+              {selectedScorecard?.hasData && (
+                <Card data-testid="card-supplier-scorecard">
+                  <CardContent className="p-4 space-y-3">
+                    <p className="text-sm font-medium">Lieferantenbewertung</p>
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span>Liefertreue</span>
+                        <span data-testid="text-score-on-time">{ratePercent(selectedScorecard.onTimeRate)}</span>
+                      </div>
+                      {/* Null (no data yet) must render visually distinct from a genuine 0% —
+                          otherwise it reads as "every delivery was late" instead of "no history". */}
+                      <Progress
+                        value={(selectedScorecard.onTimeRate ?? 0) * 100}
+                        className={selectedScorecard.onTimeRate == null ? "opacity-40" : ""}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span>Vollständigkeit</span>
+                        <span data-testid="text-score-complete">{ratePercent(selectedScorecard.completeRate)}</span>
+                      </div>
+                      <Progress
+                        value={(selectedScorecard.completeRate ?? 0) * 100}
+                        className={selectedScorecard.completeRate == null ? "opacity-40" : ""}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between text-xs text-muted-foreground">
+                        <span>Rechnungsabweichungen (niedriger ist besser)</span>
+                        <span data-testid="text-score-discrepancy">{ratePercent(selectedScorecard.discrepancyRate)}</span>
+                      </div>
+                      <Progress
+                        value={(selectedScorecard.discrepancyRate ?? 0) * 100}
+                        className={
+                          selectedScorecard.discrepancyRate == null
+                            ? "opacity-40"
+                            : selectedScorecard.discrepancyRate > 0
+                              ? "[&>div]:bg-destructive"
+                              : ""
+                        }
+                      />
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      Basierend auf {selectedScorecard.sampleOrders} Bestellung{selectedScorecard.sampleOrders === 1 ? "" : "en"} und{" "}
+                      {selectedScorecard.sampleInvoices} Rechnung{selectedScorecard.sampleInvoices === 1 ? "" : "en"}.
+                    </p>
+                  </CardContent>
+                </Card>
+              )}
               <div>
                 <div className="flex items-center justify-between gap-3 mb-2">
                   <p className="text-sm font-medium">

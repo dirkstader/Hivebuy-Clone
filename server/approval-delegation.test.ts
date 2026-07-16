@@ -39,8 +39,11 @@ describe("approval delegations (Freigabe-Vertretung)", () => {
   });
 
   it("sets, shows, and clears a delegation", async () => {
+    // Sabine already has a seeded delegation (see server/seed.ts) — this call replaces it,
+    // so 200 (update), not 201 (create). The 201-on-genuinely-new-delegation path is covered
+    // in its own test below, using a delegator with no prior delegation.
     const set = await setDelegation(sabine.token, { delegateId: markus.user.id, note: "Urlaub" });
-    expect(set.status).toBe(201);
+    expect(set.status).toBe(200);
     expect(set.body.delegation.delegateName).toBe("Markus Vogt");
 
     const view = await request(app).get("/api/delegations/me").set(...auth(sabine.token));
@@ -62,9 +65,23 @@ describe("approval delegations (Freigabe-Vertretung)", () => {
     expect(res.status).toBe(400);
   });
 
-  it("only approver/finance/purchasing may set a delegation for themselves", async () => {
-    const res = await setDelegation(lea.token, { delegateId: sabine.user.id });
-    expect(res.status).toBe(403);
+  it("only approver/finance may set a delegation for themselves", async () => {
+    const asRequester = await setDelegation(lea.token, { delegateId: sabine.user.id });
+    expect(asRequester.status).toBe(403);
+
+    // Purchasing/"Admin" may still be NAMED as someone's delegate (borrowed authority), but
+    // canActOnStep never grants "purchasing" any step authority directly — so a purchasing
+    // user has nothing of their own to delegate, and setting up their own delegation is
+    // rejected outright rather than silently succeeding as an inert no-op.
+    const asPurchasing = await setDelegation(jana.token, { delegateId: markus.user.id });
+    expect(asPurchasing.status).toBe(403);
+  });
+
+  it("reports 201 for a genuinely new delegation (not a replace)", async () => {
+    // Dirk (finance) has no seeded delegation, unlike Sabine.
+    const set = await setDelegation(dirk.token, { delegateId: markus.user.id });
+    expect(set.status).toBe(201);
+    await setDelegation(dirk.token, { delegateId: null }); // clean up for other tests
   });
 
   it("a purchasing (Admin) delegate can decide on behalf of an absent approver — borrowed authority", async () => {
@@ -142,6 +159,20 @@ describe("approval delegations (Freigabe-Vertretung)", () => {
       .set(...auth(jana.token))
       .send({ decision: "approved" });
     expect(decision.status).toBe(403);
+
+    await setDelegation(sabine.token, { delegateId: null });
+  });
+
+  it("a delegation ending 'today' (bare date, as sent by the date-picker) is still active through the whole day", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    await setDelegation(sabine.token, { delegateId: jana.user.id, endsAt: today });
+    const id = await submitRequest(tobias.token, "Vertretungstest (endet heute)");
+
+    const decision = await request(app)
+      .post(`/api/purchase-requests/${id}/decision`)
+      .set(...auth(jana.token))
+      .send({ decision: "approved" });
+    expect(decision.status).toBe(200);
 
     await setDelegation(sabine.token, { delegateId: null });
   });

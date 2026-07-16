@@ -114,6 +114,11 @@ describe("purchase request approval workflow", () => {
     const orders = await request(app).get("/api/purchase-orders").set(...auth(jana.token));
     const po = orders.body.find((o: any) => o.requestId === id);
     expect(po).toBeTruthy();
+    // Auto-created orders default to an expected delivery ~14 days out — without SOME value
+    // here, the supplier-scorecard on-time-delivery leg would never have real data to compute
+    // from for any order placed through the app's own UI/flow.
+    expect(po.expectedDelivery).toBeTruthy();
+    expect(new Date(po.expectedDelivery).getTime()).toBeGreaterThan(Date.now());
 
     // Goods receipt now runs through the receipts endpoint. Book the full quantity.
     const poDetail = await request(app).get(`/api/purchase-orders/${po.id}`).set(...auth(jana.token));
@@ -206,5 +211,56 @@ describe("purchase request approval workflow", () => {
       .set(...auth(sabine.token))
       .send({ decision: "approved" });
     expect(selfApprove.status).toBe(403);
+  });
+
+  it("blocks the owner from rewriting a request's fields once it has left draft status", async () => {
+    const create = await request(app)
+      .post("/api/purchase-requests")
+      .set(...auth(lea.token))
+      .send({
+        costCenterId: 1,
+        title: "PATCH-Tampering-Test",
+        status: "pending_approval",
+        lineItems: [{ description: "Artikel", quantity: 1, unitPrice: 3000 }], // <= threshold -> single step
+      });
+    const id = create.body.id;
+
+    await request(app).post(`/api/purchase-requests/${id}/decision`).set(...auth(sabine.token)).send({ decision: "approved" });
+
+    // No `status` field in the body — this used to fall through to an owner/purchasing-only
+    // check that never looked at the request's lifecycle stage, letting an already-approved
+    // request's totalAmount (and therefore whether a second finance sign-off was required) be
+    // rewritten after the fact.
+    const tamper = await request(app)
+      .patch(`/api/purchase-requests/${id}`)
+      .set(...auth(lea.token))
+      .send({ totalAmount: 50000 });
+    expect(tamper.status).toBe(403);
+
+    const after = await request(app).get(`/api/purchase-requests/${id}`).set(...auth(lea.token));
+    expect(after.body.totalAmount).toBe(3000);
+  });
+
+  it("fails a final approval with 409 instead of silently skipping the budget reservation when the cost center has no active period", async () => {
+    const create = await request(app)
+      .post("/api/purchase-requests")
+      .set(...auth(lea.token))
+      .send({
+        costCenterId: 999999, // no such cost center — nothing validates this at creation time
+        title: "Ungültige-Kostenstelle-Test",
+        status: "pending_approval",
+        lineItems: [{ description: "Artikel", quantity: 1, unitPrice: 100 }],
+      });
+    const id = create.body.id;
+
+    const decision = await request(app)
+      .post(`/api/purchase-requests/${id}/decision`)
+      .set(...auth(sabine.token))
+      .send({ decision: "approved" });
+    expect(decision.status).toBe(409);
+
+    // The request must NOT have been silently marked approved without a budget commitment.
+    const after = await request(app).get(`/api/purchase-requests/${id}`).set(...auth(lea.token));
+    expect(after.body.status).toBe("pending_approval");
   });
 });

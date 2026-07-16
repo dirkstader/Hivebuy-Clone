@@ -32,6 +32,10 @@ const loginLimiter = rateLimit({
 // suppliers.tsx / invoices.tsx. Approver capability is handled per-step via canActOnStep.
 const PURCHASING_ROLES = ["purchasing", "finance"] as const;
 
+function isPurchasingRole(role: string): boolean {
+  return (PURCHASING_ROLES as readonly string[]).includes(role);
+}
+
 // Requests above this net amount require a second (finance) sign-off on top of the
 // regular approver step. Below it, a single approver step is enough.
 const FINANCE_APPROVAL_THRESHOLD = 5000;
@@ -52,14 +56,29 @@ function canActOnStep(userRole: string, stepRole: string): boolean {
   return userRole === "approver" && stepRole === "approver";
 }
 
-// Roles eligible to be named as a Freigabe-Vertretung (delegate). Hardcoded for now — a
-// future flag could open this up to any role, but for the first version only approver/
-// finance/purchasing ("Admin") can stand in for someone else's approval authority.
+// Roles eligible to be NAMED as a Freigabe-Vertretung (delegate) — the delegate borrows the
+// delegator's approval authority, so this is "who can receive borrowed authority".
+// Hardcoded for now — a future flag could open this up to any role.
 const DELEGATE_ELIGIBLE_ROLES = ["approver", "finance", "purchasing"] as const;
+
+// Roles eligible to BE a delegator (i.e. to call PUT /api/delegations/me for themselves).
+// Deliberately narrower than DELEGATE_ELIGIBLE_ROLES: canActOnStep never grants "purchasing"
+// any step authority to begin with, so a purchasing user delegating would hand off authority
+// they don't have — silently inert, not a real Vertretung. Only approver/finance have
+// step-decision authority worth delegating.
+const DELEGATOR_ELIGIBLE_ROLES = ["approver", "finance"] as const;
+
+// endsAt may be a bare "YYYY-MM-DD" (the client's <input type="date">) or a full ISO
+// timestamp (e.g. from seed data) — normalize a bare date to end-of-day before comparing
+// against a full timestamp, otherwise a delegation "ending today" reads as already expired
+// at midnight instead of through the end of that day.
+function endOfDayIfDateOnly(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T23:59:59.999Z` : value;
+}
 
 function delegationIsActive(d: { startsAt: string | null; endsAt: string | null }, nowIso: string): boolean {
   if (d.startsAt && d.startsAt > nowIso) return false;
-  if (d.endsAt && d.endsAt < nowIso) return false;
+  if (d.endsAt && endOfDayIfDateOnly(d.endsAt) < nowIso) return false;
   return true;
 }
 
@@ -76,6 +95,14 @@ async function resolveActingAuthority(actor: { id: number; role: string }, stepR
     if (delegator && canActOnStep(delegator.role, stepRole)) return delegator.id;
   }
   return undefined;
+}
+
+// Whether a decision on behalf of `requesterId` is blocked by segregation-of-duties: normally
+// yes if the represented delegator IS the requester, except a purchasing ("Admin") delegate,
+// who is trusted to self-approve on someone else's behalf too. Shared by the decision
+// endpoint and /api/notifications so both stay in lockstep (previously duplicated inline).
+function selfApprovalBlocked(actingForId: number, requesterId: number, actorRole: string): boolean {
+  return actingForId === requesterId && actorRole !== "purchasing";
 }
 
 // The receipt state of a purchase order: its request's line items enriched with the
@@ -203,6 +230,73 @@ export async function registerRoutes(
     res.json(await storage.listSuppliers());
   });
 
+  // Computed on demand from existing goods-receipt/invoice data — no persistence, no new
+  // schema, same "load once, reduce in JS" style as /api/analytics further below.
+  // suppliers.rating (the static seeded number) stays as the fallback for suppliers with no
+  // order/invoice history yet, exposed here as fallbackRating. Must be registered before
+  // GET /api/suppliers/:id below — otherwise that param route would shadow "scorecards" as
+  // an :id and this route would never be reached.
+  app.get("/api/suppliers/scorecards", async (_req, res) => {
+    const [suppliersList, orders, invoicesList] = await Promise.all([
+      storage.listSuppliers(),
+      storage.listPurchaseOrders(),
+      storage.listInvoices(),
+    ]);
+
+    const ordersBySupplier = new Map<number, typeof orders>();
+    for (const o of orders) {
+      const list = ordersBySupplier.get(o.supplierId);
+      if (list) list.push(o); else ordersBySupplier.set(o.supplierId, [o]);
+    }
+    const invoicesBySupplier = new Map<number, typeof invoicesList>();
+    for (const inv of invoicesList) {
+      const list = invoicesBySupplier.get(inv.supplierId);
+      if (list) list.push(inv); else invoicesBySupplier.set(inv.supplierId, [inv]);
+    }
+
+    const scorecards = await Promise.all(suppliersList.map(async (s) => {
+      const supplierOrders = ordersBySupplier.get(s.id) ?? [];
+      let completeTotal = 0, completeHit = 0, onTimeTotal = 0, onTimeHit = 0;
+      for (const o of supplierOrders) {
+        const receipts = await storage.listGoodsReceiptsByOrder(o.id);
+        if (receipts.length === 0) continue; // not yet due / no info
+        completeTotal++;
+        if (o.status === "received") {
+          completeHit++;
+          if (o.expectedDelivery) {
+            onTimeTotal++;
+            const lastReceivedAt = receipts.reduce((latest, r) => (r.receivedAt > latest ? r.receivedAt : latest), receipts[0].receivedAt);
+            if (lastReceivedAt <= o.expectedDelivery) onTimeHit++;
+          }
+        }
+      }
+
+      const supplierInvoices = invoicesBySupplier.get(s.id) ?? [];
+      const discrepancyTotal = supplierInvoices.length;
+      const discrepancyHit = supplierInvoices.filter((i) => i.status === "discrepancy").length;
+
+      const onTimeRate = onTimeTotal ? onTimeHit / onTimeTotal : null;
+      const completeRate = completeTotal ? completeHit / completeTotal : null;
+      const discrepancyRate = discrepancyTotal ? discrepancyHit / discrepancyTotal : null;
+
+      const parts: { rate: number; weight: number }[] = [];
+      if (onTimeRate != null) parts.push({ rate: onTimeRate, weight: 0.4 });
+      if (completeRate != null) parts.push({ rate: completeRate, weight: 0.3 });
+      if (discrepancyRate != null) parts.push({ rate: 1 - discrepancyRate, weight: 0.3 });
+
+      const hasData = parts.length > 0;
+      const weightSum = parts.reduce((sum, p) => sum + p.weight, 0);
+      const score = hasData ? Math.round((100 * parts.reduce((sum, p) => sum + p.rate * p.weight, 0)) / weightSum) : null;
+
+      return {
+        supplierId: s.id, onTimeRate, completeRate, discrepancyRate, score, hasData,
+        sampleOrders: completeTotal, sampleInvoices: discrepancyTotal, fallbackRating: s.rating,
+      };
+    }));
+
+    res.json(scorecards);
+  });
+
   app.get("/api/suppliers/:id", async (req, res) => {
     const supplier = await storage.getSupplier(Number(req.params.id));
     if (!supplier) return res.status(404).json({ message: "Lieferant nicht gefunden." });
@@ -323,12 +417,17 @@ export async function registerRoutes(
 
     const actor = req.user!;
     const isOwner = existing.requesterId === actor.id;
-    const isPurchasing = (PURCHASING_ROLES as readonly string[]).includes(actor.role);
+    const isPurchasing = isPurchasingRole(actor.role);
     const nextStatus = parsed.data.status;
 
     // Approve/reject run through POST /:id/decision (multi-step chain); goods receipt runs
     // through POST /api/purchase-orders/:id/receipts (which flips the request to "received").
-    // This PATCH only covers submit and "ordered", plus draft edits by the owner.
+    // This PATCH only covers submit and "ordered", plus draft edits by the owner. Editing any
+    // field (title, totalAmount, lineItems, costCenterId, ...) without changing status is only
+    // ever legitimate while the request is still a draft — once it has left "draft", the only
+    // way to change it is through an explicit, validated status transition below, so a
+    // decided/ordered/received request can't be silently rewritten (e.g. inflating totalAmount
+    // post-approval to dodge the finance sign-off threshold).
     if (nextStatus && nextStatus !== existing.status) {
       const allowed =
         (nextStatus === "pending_approval" && existing.status === "draft" && isOwner) ||
@@ -336,7 +435,7 @@ export async function registerRoutes(
       if (!allowed) {
         return res.status(403).json({ message: "Für diesen Statuswechsel fehlt die Berechtigung." });
       }
-    } else if (!isOwner && !isPurchasing) {
+    } else if (existing.status !== "draft" || (!isOwner && !isPurchasing)) {
       return res.status(403).json({ message: "Für diese Änderung fehlt die Berechtigung." });
     }
 
@@ -367,16 +466,20 @@ export async function registerRoutes(
         note: activityNote ?? "", createdAt: new Date().toISOString(),
       });
 
-      // On "ordered", auto-create a purchase order.
+      // On "ordered", auto-create a purchase order. expectedDelivery defaults to 14 days out
+      // (no UI lets purchasing set a real delivery date yet) — without SOME value here, the
+      // supplier scorecard's on-time-delivery leg (GET /api/suppliers/scorecards) would never
+      // have any data to compute from, for any order placed through the app.
       if (nextStatus === "ordered" && updated && updated.supplierId) {
+        const orderedAt = new Date();
         await storage.createPurchaseOrder({
           orderNumber: genNumber("PO"),
           requestId: updated.id,
           supplierId: updated.supplierId,
           status: "open",
           totalAmount: updated.totalAmount,
-          orderedAt: new Date().toISOString(),
-          expectedDelivery: null,
+          orderedAt: orderedAt.toISOString(),
+          expectedDelivery: new Date(orderedAt.getTime() + 14 * 86400000).toISOString(),
         });
       }
     }
@@ -419,11 +522,25 @@ export async function registerRoutes(
       return res.status(403).json({ message: "Für diese Freigabestufe fehlt die Berechtigung." });
     }
     const isDelegating = actingForId !== actor.id;
-    // Segregation of duties for the represented delegator: a delegate normally can't decide
-    // a request where the person they represent is the requester — except a purchasing
-    // ("Admin") delegate, who is trusted to self-approve on someone else's behalf too.
-    if (isDelegating && actingForId === request.requesterId && actor.role !== "purchasing") {
+    if (isDelegating && selfApprovalBlocked(actingForId, request.requesterId, actor.role)) {
       return res.status(403).json({ message: "Die eigene Anforderung kann nicht selbst freigegeben werden." });
+    }
+
+    const remaining = steps.filter((s) => s.status === "pending" && s.id !== currentStep.id);
+    const isFinalApproval = decision === "approved" && remaining.length === 0;
+
+    // If this decision would fully approve the request, confirm there's an active budget
+    // period to reserve against BEFORE touching the approval step or request — otherwise the
+    // step could end up persisted as "approved" with the request stuck unable to progress
+    // (no pending step left to retry, but never marked approved either). Mirrors the hard 409
+    // the rollover endpoint gives for the same precondition instead of silently skipping the
+    // budget commitment.
+    let period: Awaited<ReturnType<typeof storage.getActivePeriod>>;
+    if (isFinalApproval) {
+      period = await storage.getActivePeriod(request.costCenterId);
+      if (!period) {
+        return res.status(409).json({ message: "Die Kostenstelle hat keine aktive Budgetperiode — Freigabe nicht möglich." });
+      }
     }
 
     const now = new Date().toISOString();
@@ -432,27 +549,23 @@ export async function registerRoutes(
       comment, decidedAt: now,
     });
 
-    const remaining = steps.filter((s) => s.status === "pending" && s.id !== currentStep.id);
     let updated;
     if (decision === "rejected") {
       updated = await storage.updatePurchaseRequest(id, {
         status: "rejected", approverId: actor.id, approverComment: comment, decidedAt: now,
       });
-    } else if (remaining.length === 0) {
+    } else if (isFinalApproval) {
       // Last step approved → request is fully approved. Reserve the budget as a commitment
       // (Obligo) rather than counting it as spent — actual spend is booked when invoiced.
       updated = await storage.updatePurchaseRequest(id, {
         status: "approved", approverId: actor.id, approverComment: comment, decidedAt: now,
       });
-      if (updated) {
-        const period = await storage.getActivePeriod(updated.costCenterId);
-        if (period) {
-          await storage.createBudgetCommitment({
-            costCenterId: updated.costCenterId, periodId: period.id, requestId: updated.id,
-            amount: updated.totalAmount, status: "reserved", createdAt: now, resolvedAt: null,
-          });
-          await storage.updatePeriodCommitted(period.id, updated.totalAmount);
-        }
+      if (updated && period) {
+        await storage.createBudgetCommitment({
+          costCenterId: updated.costCenterId, periodId: period.id, requestId: updated.id,
+          amount: updated.totalAmount, status: "reserved", createdAt: now, resolvedAt: null,
+        });
+        await storage.updatePeriodCommitted(period.id, updated.totalAmount);
       }
     } else {
       // More steps remain — record the interim approval but keep the request pending.
@@ -462,7 +575,7 @@ export async function registerRoutes(
     const onBehalfOf = isDelegating ? await storage.getUser(actingForId) : undefined;
     await storage.createActivity({
       entityType: "request", entityId: id, actorId: actor.id,
-      action: decision === "rejected" ? "rejected" : remaining.length === 0 ? "approved" : "step_approved",
+      action: decision === "rejected" ? "rejected" : isFinalApproval ? "approved" : "step_approved",
       note: [comment, onBehalfOf && `(Vertretung für ${onBehalfOf.name})`].filter(Boolean).join(" "),
       createdAt: now,
     });
@@ -499,6 +612,24 @@ export async function registerRoutes(
       .filter((l: any) => Number.isFinite(l.requestLineItemId) && Number.isFinite(l.quantityReceived) && l.quantityReceived > 0);
     if (valid.length === 0) {
       return res.status(400).json({ message: "Es wurde keine empfangene Menge angegeben." });
+    }
+
+    // Reject over-receipt: a line's cumulative received quantity may never exceed what was
+    // ordered — otherwise receivedValue in the 3-way match (below) could be inflated past the
+    // real order value and let an equally-inflated invoice pass as "matched".
+    const orderedLines = await storage.listLineItems(order.requestId);
+    const alreadyReceived = await storage.receivedQuantitiesByOrder(orderId);
+    for (const line of valid) {
+      const orderedLine = orderedLines.find((li) => li.id === line.requestLineItemId);
+      if (!orderedLine) {
+        return res.status(400).json({ message: "Unbekannte Bestellposition." });
+      }
+      const totalAfter = (alreadyReceived.get(line.requestLineItemId) ?? 0) + line.quantityReceived;
+      if (totalAfter > orderedLine.quantity + 1e-9) {
+        return res.status(400).json({
+          message: `Menge für "${orderedLine.description}" übersteigt die bestellte Menge (${orderedLine.quantity}).`,
+        });
+      }
     }
 
     const now = new Date().toISOString();
@@ -572,6 +703,14 @@ export async function registerRoutes(
     });
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
 
+    // One order gets at most one invoice — the 3-way match and budget realization below both
+    // assume a single invoice per order; a second invoice would silently fail to book its
+    // amount as spend (the reservation is already realized) instead of erroring out.
+    const existingInvoices = await storage.listInvoices();
+    if (existingInvoices.some((i) => i.orderId === parsed.data.orderId)) {
+      return res.status(409).json({ message: "Für diese Bestellung liegt bereits eine Rechnung vor." });
+    }
+
     const amount = parsed.data.amount ?? 0;
     const fmt = (v: number) => `${v.toFixed(2)} €`;
 
@@ -631,24 +770,54 @@ export async function registerRoutes(
     });
   }
 
-  const ATTACHMENT_PARENTS: Record<string, { getParent: (id: number) => Promise<unknown>; notFoundMessage: string }> = {
-    request: { getParent: (id) => storage.getPurchaseRequest(id), notFoundMessage: "Bestellanforderung nicht gefunden." },
-    order: { getParent: (id) => storage.getPurchaseOrder(id), notFoundMessage: "Bestellung nicht gefunden." },
-    invoice: { getParent: (id) => storage.getInvoice(id), notFoundMessage: "Rechnung nicht gefunden." },
+  type AttachmentActor = { id: number; role: string };
+  const ATTACHMENT_PARENTS: Record<string, {
+    getParent: (id: number) => Promise<any>;
+    notFoundMessage: string;
+    // Requests are broadly readable app-wide today (GET /api/purchase-requests/:id has no
+    // role gate either), so attachment visibility follows the same convention. Orders and
+    // invoices are purchasing/finance-operational entities — every other mutation on them
+    // (POST/PATCH /api/purchase-orders, /api/invoices) already requires PURCHASING_ROLES, so
+    // their attachments (list/upload alike) follow the same gate.
+    canView: (parent: any, actor: AttachmentActor) => boolean;
+    canUpload: (parent: any, actor: AttachmentActor) => boolean;
+  }> = {
+    request: {
+      getParent: (id) => storage.getPurchaseRequest(id),
+      notFoundMessage: "Bestellanforderung nicht gefunden.",
+      canView: () => true,
+      canUpload: (parent, actor) => parent.requesterId === actor.id || isPurchasingRole(actor.role),
+    },
+    order: {
+      getParent: (id) => storage.getPurchaseOrder(id),
+      notFoundMessage: "Bestellung nicht gefunden.",
+      canView: (_parent, actor) => isPurchasingRole(actor.role),
+      canUpload: (_parent, actor) => isPurchasingRole(actor.role),
+    },
+    invoice: {
+      getParent: (id) => storage.getInvoice(id),
+      notFoundMessage: "Rechnung nicht gefunden.",
+      canView: (_parent, actor) => isPurchasingRole(actor.role),
+      canUpload: (_parent, actor) => isPurchasingRole(actor.role),
+    },
   };
 
   function registerAttachmentRoutes(entityType: keyof typeof ATTACHMENT_PARENTS, routePrefix: string) {
-    const { getParent, notFoundMessage } = ATTACHMENT_PARENTS[entityType];
+    const { getParent, notFoundMessage, canView, canUpload } = ATTACHMENT_PARENTS[entityType];
 
     app.get(`/api/${routePrefix}/:id/attachments`, async (req, res) => {
       const entityId = Number(req.params.id);
-      if (!(await getParent(entityId))) return res.status(404).json({ message: notFoundMessage });
+      const parent = await getParent(entityId);
+      if (!parent) return res.status(404).json({ message: notFoundMessage });
+      if (!canView(parent, req.user!)) return res.status(403).json({ message: "Für diese Anhänge fehlt die Berechtigung." });
       res.json(await storage.listAttachments(entityType, entityId));
     });
 
     app.post(`/api/${routePrefix}/:id/attachments`, handleUpload, async (req, res) => {
       const entityId = Number(req.params.id);
-      if (!(await getParent(entityId))) return res.status(404).json({ message: notFoundMessage });
+      const parent = await getParent(entityId);
+      if (!parent) return res.status(404).json({ message: notFoundMessage });
+      if (!canUpload(parent, req.user!)) return res.status(403).json({ message: "Für das Hochladen fehlt die Berechtigung." });
       if (!req.file) return res.status(400).json({ message: "Keine Datei übermittelt." });
 
       const now = new Date().toISOString();
@@ -671,14 +840,18 @@ export async function registerRoutes(
   app.get("/api/attachments/:id/download", async (req, res) => {
     const attachment = await storage.getAttachment(Number(req.params.id));
     if (!attachment) return res.status(404).json({ message: "Anhang nicht gefunden." });
+    const parentDef = ATTACHMENT_PARENTS[attachment.entityType];
+    const parent = parentDef && (await parentDef.getParent(attachment.entityId));
+    if (!parentDef || !parent || !parentDef.canView(parent, req.user!)) {
+      return res.status(403).json({ message: "Für diesen Anhang fehlt die Berechtigung." });
+    }
     res.download(attachmentPath(attachment.storedName), attachment.filename);
   });
 
   app.delete("/api/attachments/:id", async (req, res) => {
     const attachment = await storage.getAttachment(Number(req.params.id));
     if (!attachment) return res.status(404).json({ message: "Anhang nicht gefunden." });
-    const isPurchasing = (PURCHASING_ROLES as readonly string[]).includes(req.user!.role);
-    if (attachment.uploadedById !== req.user!.id && !isPurchasing) {
+    if (attachment.uploadedById !== req.user!.id && !isPurchasingRole(req.user!.role)) {
       return res.status(403).json({ message: "Für das Löschen dieses Anhangs fehlt die Berechtigung." });
     }
     fs.unlink(attachmentPath(attachment.storedName), () => {});
@@ -820,7 +993,7 @@ export async function registerRoutes(
     });
   });
 
-  app.put("/api/delegations/me", requireRole(...DELEGATE_ELIGIBLE_ROLES), async (req, res) => {
+  app.put("/api/delegations/me", requireRole(...DELEGATOR_ELIGIBLE_ROLES), async (req, res) => {
     const actor = req.user!;
     const parsed = setDelegationSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
@@ -838,12 +1011,16 @@ export async function registerRoutes(
       return res.status(400).json({ message: "Diese Person kann nicht als Vertretung eingetragen werden (Rolle nicht berechtigt)." });
     }
 
+    // Setting a delegation is create-or-replace (a delegator has at most one active row) —
+    // report 200 when this replaces an existing delegation, 201 only for a genuinely new one,
+    // matching the create=201/update=200 convention used by every other endpoint in this file.
+    const existed = !!(await storage.getApprovalDelegationByDelegator(actor.id));
     const saved = await storage.upsertApprovalDelegation({
       delegatorId: actor.id, delegateId: delegate.id,
       startsAt: parsed.data.startsAt ?? null, endsAt: parsed.data.endsAt ?? null,
       note: parsed.data.note ?? "", createdAt: new Date().toISOString(),
     });
-    res.status(201).json({ delegation: { ...saved, delegateName: delegate.name } });
+    res.status(existed ? 200 : 201).json({ delegation: { ...saved, delegateName: delegate.name } });
   });
 
   // ---------- Notifications ----------
@@ -852,7 +1029,7 @@ export async function registerRoutes(
   // activity log for the current user.
   app.get("/api/notifications", async (req, res) => {
     const actor = req.user!;
-    const isPurchasing = (PURCHASING_ROLES as readonly string[]).includes(actor.role);
+    const isPurchasing = isPurchasingRole(actor.role);
     const requests = await storage.listPurchaseRequests();
     const notifications: {
       id: string; type: string; title: string; description: string; href: string; createdAt: string;
@@ -867,7 +1044,7 @@ export async function registerRoutes(
         if (current) {
           const actingForId = await resolveActingAuthority(actor, current.approverRole);
           const blockedBySoD = actingForId !== undefined && actingForId !== actor.id
-            && actingForId === r.requesterId && actor.role !== "purchasing";
+            && selfApprovalBlocked(actingForId, r.requesterId, actor.role);
           if (actingForId !== undefined && !blockedBySoD) {
             notifications.push({
               id: `approval-${r.id}`, type: "approval",

@@ -19,6 +19,12 @@ interface DelegationResponse {
   delegatingFor: User[];
 }
 
+// Only approver/finance actually have step-decision authority to hand off (see
+// DELEGATOR_ELIGIBLE_ROLES in server/routes.ts) — a purchasing/"Admin" user delegating would
+// be handing off authority they don't have, so they only ever see who they're covering FOR,
+// not a form to set up their own delegation.
+const CAN_DELEGATE_ROLES = ["approver", "finance"];
+
 export default function Delegation() {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -28,6 +34,7 @@ export default function Delegation() {
 
   const { data, isLoading } = useQuery<DelegationResponse>({ queryKey: ["/api/delegations/me"] });
   const { data: users } = useQuery<User[]>({ queryKey: ["/api/users"] });
+  const canDelegate = !!user && CAN_DELEGATE_ROLES.includes(user.role);
 
   const eligibleDelegates = (users ?? []).filter(
     (u) => u.id !== user?.id && DELEGATE_ELIGIBLE_ROLES.includes(u.role)
@@ -73,76 +80,78 @@ export default function Delegation() {
         <Skeleton className="h-48 w-full" />
       ) : (
         <>
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm">Meine Vertretung</CardTitle>
-            </CardHeader>
-            <CardContent className="pt-0 space-y-4">
-              {data?.delegation ? (
-                <div className="flex items-center justify-between gap-3 rounded-md border border-card-border p-3">
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium" data-testid="text-current-delegate">
-                      {data.delegation.delegateName}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {data.delegation.endsAt ? `Befristet bis ${new Date(data.delegation.endsAt).toLocaleDateString("de-DE")}` : "Unbefristet"}
-                      {data.delegation.note ? ` · ${data.delegation.note}` : ""}
-                    </p>
+          {canDelegate && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm">Meine Vertretung</CardTitle>
+              </CardHeader>
+              <CardContent className="pt-0 space-y-4">
+                {data?.delegation ? (
+                  <div className="flex items-center justify-between gap-3 rounded-md border border-card-border p-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium" data-testid="text-current-delegate">
+                        {data.delegation.delegateName}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {data.delegation.endsAt ? `Befristet bis ${new Date(data.delegation.endsAt).toLocaleDateString("de-DE")}` : "Unbefristet"}
+                        {data.delegation.note ? ` · ${data.delegation.note}` : ""}
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline" size="sm" onClick={() => clear.mutate()} disabled={clear.isPending}
+                      data-testid="button-clear-delegation"
+                    >
+                      Aufheben
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground" data-testid="text-no-delegation">
+                    Aktuell keine Vertretung eingetragen.
+                  </p>
+                )}
+
+                <div className="space-y-3 pt-2 border-t border-border">
+                  <div className="space-y-1.5">
+                    <Label>Vertretung durch</Label>
+                    <Select value={delegateId} onValueChange={setDelegateId}>
+                      <SelectTrigger data-testid="select-delegate">
+                        <SelectValue placeholder="Person wählen" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {eligibleDelegates.map((u) => (
+                          <SelectItem key={u.id} value={String(u.id)}>
+                            {u.name} · {ROLE_LABELS[u.role] ?? u.role}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="delegation-ends-at">Befristet bis (optional)</Label>
+                    <Input
+                      id="delegation-ends-at" type="date" value={endsAt}
+                      onChange={(e) => setEndsAt(e.target.value)}
+                      data-testid="input-delegation-ends-at"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="delegation-note">Notiz (optional)</Label>
+                    <Input
+                      id="delegation-note" value={note} placeholder="z.B. Urlaubsvertretung"
+                      onChange={(e) => setNote(e.target.value)}
+                      data-testid="input-delegation-note"
+                    />
                   </div>
                   <Button
-                    variant="outline" size="sm" onClick={() => clear.mutate()} disabled={clear.isPending}
-                    data-testid="button-clear-delegation"
+                    onClick={() => save.mutate()} disabled={save.isPending || !delegateId}
+                    data-testid="button-save-delegation"
                   >
-                    Aufheben
+                    <UserCog className="h-4 w-4" /> Vertretung eintragen
                   </Button>
                 </div>
-              ) : (
-                <p className="text-sm text-muted-foreground" data-testid="text-no-delegation">
-                  Aktuell keine Vertretung eingetragen.
-                </p>
-              )}
-
-              <div className="space-y-3 pt-2 border-t border-border">
-                <div className="space-y-1.5">
-                  <Label>Vertretung durch</Label>
-                  <Select value={delegateId} onValueChange={setDelegateId}>
-                    <SelectTrigger data-testid="select-delegate">
-                      <SelectValue placeholder="Person wählen" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {eligibleDelegates.map((u) => (
-                        <SelectItem key={u.id} value={String(u.id)}>
-                          {u.name} · {ROLE_LABELS[u.role] ?? u.role}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="delegation-ends-at">Befristet bis (optional)</Label>
-                  <Input
-                    id="delegation-ends-at" type="date" value={endsAt}
-                    onChange={(e) => setEndsAt(e.target.value)}
-                    data-testid="input-delegation-ends-at"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="delegation-note">Notiz (optional)</Label>
-                  <Input
-                    id="delegation-note" value={note} placeholder="z.B. Urlaubsvertretung"
-                    onChange={(e) => setNote(e.target.value)}
-                    data-testid="input-delegation-note"
-                  />
-                </div>
-                <Button
-                  onClick={() => save.mutate()} disabled={save.isPending || !delegateId}
-                  data-testid="button-save-delegation"
-                >
-                  <UserCog className="h-4 w-4" /> Vertretung eintragen
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+          )}
 
           {(data?.delegatingFor.length ?? 0) > 0 && (
             <Card>
