@@ -98,6 +98,40 @@ export const insertSupplierSchema = createInsertSchema(suppliers).omit({ id: tru
 export type InsertSupplier = z.infer<typeof insertSupplierSchema>;
 export type Supplier = typeof suppliers.$inferSelect;
 
+// ---------- Contracts (Verträge) ----------
+// A contract's lifecycle (notice deadline, "expiring soon", etc.) is computed on read from
+// endDate/noticePeriodDays/autoRenew (see contractLifecycle in server/routes.ts) — never
+// stored, so nothing needs a scheduled job to stay accurate.
+export const CONTRACT_STATUSES = ["active", "cancelled"] as const;
+export type ContractStatus = (typeof CONTRACT_STATUSES)[number];
+
+export const contracts = sqliteTable("contracts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  contractNumber: text("contract_number").notNull().unique(),
+  title: text("title").notNull(),
+  supplierId: integer("supplier_id").notNull(),
+  costCenterId: integer("cost_center_id"), // nullable — a contract need not tie to one cost center
+  value: real("value").notNull().default(0),
+  startDate: text("start_date").notNull(),
+  endDate: text("end_date"), // null = unbefristet (no fixed end)
+  noticePeriodDays: integer("notice_period_days").notNull().default(90),
+  autoRenew: integer("auto_renew", { mode: "boolean" }).notNull().default(false),
+  status: text("status").notNull().default("active"), // active | cancelled (manual early termination)
+  note: text("note").notNull().default(""),
+  createdAt: text("created_at").notNull(),
+  cancelledAt: text("cancelled_at"),
+});
+
+// value/noticePeriodDays stay optional (matching the original drizzle-zod-derived shape) so
+// omitting them still falls through to the column defaults (0 / 90) — only validated when
+// the client actually provides one.
+export const insertContractSchema = createInsertSchema(contracts).omit({ id: true }).extend({
+  value: z.number().nonnegative().optional(),
+  noticePeriodDays: z.number().int().nonnegative().optional(),
+});
+export type InsertContract = z.infer<typeof insertContractSchema>;
+export type Contract = typeof contracts.$inferSelect;
+
 // ---------- Catalog Items ----------
 export const catalogItems = sqliteTable("catalog_items", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -342,7 +376,7 @@ export type ApprovalDelegation = typeof approvalDelegations.$inferSelect;
 // invoice). Files live on disk under UPLOADS_DIR (see server/uploads.ts) — storedName is the
 // random on-disk filename (never client-controlled), filename is the original name shown/
 // downloaded to the user.
-export const ATTACHMENT_ENTITY_TYPES = ["request", "order", "invoice"] as const;
+export const ATTACHMENT_ENTITY_TYPES = ["request", "order", "invoice", "contract"] as const;
 export type AttachmentEntityType = (typeof ATTACHMENT_ENTITY_TYPES)[number];
 
 export const attachments = sqliteTable("attachments", {

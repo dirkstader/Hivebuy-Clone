@@ -10,12 +10,13 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth-context";
 import { formatDateTime } from "@/lib/format";
-import type { Attachment } from "@shared/schema";
+import type { Attachment, AttachmentEntityType } from "@shared/schema";
 
-const ROUTE_PREFIX: Record<string, string> = {
+const ROUTE_PREFIX: Record<AttachmentEntityType, string> = {
   request: "purchase-requests",
   order: "purchase-orders",
   invoice: "invoices",
+  contract: "contracts",
 };
 
 function formatSize(bytes: number) {
@@ -25,7 +26,7 @@ function formatSize(bytes: number) {
 }
 
 interface AttachmentsPanelProps {
-  entityType: "request" | "order" | "invoice";
+  entityType: AttachmentEntityType;
   entityId: number;
 }
 

@@ -2,7 +2,7 @@ import {
   users, costCenters, suppliers, catalogItems, purchaseRequests, requestLineItems,
   purchaseOrders, invoices, activityLog, punchoutSessions, approvalSteps,
   goodsReceipts, goodsReceiptLines, budgetCommitments, budgetPeriods, approvalDelegations,
-  attachments,
+  attachments, contracts,
 } from '@shared/schema';
 import type {
   User, InsertUser, CostCenter, InsertCostCenter, Supplier, InsertSupplier,
@@ -13,7 +13,7 @@ import type {
   GoodsReceipt, InsertGoodsReceipt, GoodsReceiptLine, InsertGoodsReceiptLine,
   BudgetCommitment, InsertBudgetCommitment, BudgetPeriod, InsertBudgetPeriod,
   CostCenterWithPeriod, ApprovalDelegation, InsertApprovalDelegation,
-  Attachment, InsertAttachment,
+  Attachment, InsertAttachment, Contract, InsertContract,
 } from '@shared/schema';
 import { and } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
@@ -63,6 +63,12 @@ export interface IStorage {
   createSupplier(s: InsertSupplier): Promise<Supplier>;
   updateSupplier(id: number, s: Partial<InsertSupplier>): Promise<Supplier | undefined>;
   deleteSupplier(id: number): Promise<void>;
+
+  // Contracts (Verträge)
+  listContracts(): Promise<Contract[]>;
+  getContract(id: number): Promise<Contract | undefined>;
+  createContract(c: InsertContract): Promise<Contract>;
+  updateContract(id: number, c: Partial<InsertContract>): Promise<Contract | undefined>;
 
   // Catalog items
   listCatalogItems(): Promise<CatalogItem[]>;
@@ -237,6 +243,13 @@ export class DatabaseStorage implements IStorage {
     return db.update(suppliers).set(s).where(eq(suppliers.id, id)).returning().get();
   }
   async deleteSupplier(id: number) { db.delete(suppliers).where(eq(suppliers.id, id)).run(); }
+
+  async listContracts() { return db.select().from(contracts).all(); }
+  async getContract(id: number) { return db.select().from(contracts).where(eq(contracts.id, id)).get(); }
+  async createContract(c: InsertContract) { return db.insert(contracts).values(c).returning().get(); }
+  async updateContract(id: number, c: Partial<InsertContract>) {
+    return db.update(contracts).set(c).where(eq(contracts.id, id)).returning().get();
+  }
 
   async listCatalogItems() { return db.select().from(catalogItems).all(); }
   async listCatalogItemsBySupplier(supplierId: number) {

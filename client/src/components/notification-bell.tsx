@@ -21,6 +21,7 @@ const ICONS: Record<string, any> = {
   rejected: X,
   order: ShoppingCart,
   discrepancy: AlertTriangle,
+  contract_expiring: AlertTriangle,
 };
 
 export function NotificationBell() {

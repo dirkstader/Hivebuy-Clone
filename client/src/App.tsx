@@ -18,6 +18,7 @@ import RequestDetail from "@/pages/request-detail";
 import Suppliers from "@/pages/suppliers";
 import Orders from "@/pages/orders";
 import Invoices from "@/pages/invoices";
+import Contracts from "@/pages/contracts";
 import CostCenters from "@/pages/cost-centers";
 import Analytics from "@/pages/analytics";
 import Delegation from "@/pages/delegation";
@@ -33,6 +34,7 @@ function AppRouter() {
       <Route path="/suppliers" component={Suppliers} />
       <Route path="/orders" component={Orders} />
       <Route path="/invoices" component={Invoices} />
+      <Route path="/contracts" component={Contracts} />
       <Route path="/cost-centers" component={CostCenters} />
       <Route path="/analytics" component={Analytics} />
       <Route path="/vertretung" component={Delegation} />

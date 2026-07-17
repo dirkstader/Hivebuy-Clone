@@ -10,11 +10,11 @@ import { AMAZON_CATALOG } from "./amazon-catalog";
 import { verifyPassword } from "./password";
 import { createSession, destroySession, requireAuth, requireRole, sanitizeUser } from "./auth";
 import { upload, attachmentPath } from "./uploads";
-import type { User } from "@shared/schema";
+import type { User, Contract } from "@shared/schema";
 import {
   insertUserSchema, createCostCenterRequestSchema, insertSupplierSchema, insertCatalogItemSchema,
   insertPurchaseRequestSchema, insertRequestLineItemSchema, insertPurchaseOrderSchema, insertInvoiceSchema,
-  insertPunchoutSessionSchema,
+  insertPunchoutSessionSchema, insertContractSchema,
 } from "@shared/schema";
 
 const loginSchema = z.object({ email: z.string().email(), password: z.string().min(1) });
@@ -130,6 +130,43 @@ function genNumber(prefix: string) {
   const year = new Date().getFullYear();
   const seq = Math.floor(1000 + Math.random() * 9000);
   return `${prefix}-${year}-${seq}`;
+}
+
+// How many days before a contract's cancellation deadline it starts showing up as "notice due
+// soon" — the whole point of tracking noticePeriodDays is to get a heads-up before it's too
+// late to act, not just to know a contract eventually ends.
+const CONTRACT_NOTICE_REMINDER_DAYS = 60;
+
+type ContractLifecycleStatus = "active" | "notice_due_soon" | "expiring" | "expired" | "cancelled";
+
+// Computed purely from endDate/noticePeriodDays/autoRenew/status — never stored, so nothing
+// needs a scheduled job to keep this accurate (mirrors delegationIsActive/orderReceiptState).
+function contractLifecycle(c: Contract, nowIso: string): {
+  noticeDeadline: string | null; daysUntilNoticeDeadline: number | null; effectiveStatus: ContractLifecycleStatus;
+} {
+  if (c.status === "cancelled") {
+    return { noticeDeadline: null, daysUntilNoticeDeadline: null, effectiveStatus: "cancelled" };
+  }
+  if (!c.endDate) {
+    return { noticeDeadline: null, daysUntilNoticeDeadline: null, effectiveStatus: "active" };
+  }
+  // A bare "YYYY-MM-DD" endDate must stay valid through the whole day it names — otherwise
+  // it reads as already expired from midnight on, the same bug endOfDayIfDateOnly already
+  // fixes for delegation windows above.
+  const endOfEndDate = endOfDayIfDateOnly(c.endDate);
+  const noticeDeadline = new Date(new Date(endOfEndDate).getTime() - c.noticePeriodDays * 86400000).toISOString();
+  const daysUntilNoticeDeadline = Math.ceil((new Date(noticeDeadline).getTime() - new Date(nowIso).getTime()) / 86400000);
+  let effectiveStatus: ContractLifecycleStatus;
+  if (nowIso > endOfEndDate) {
+    effectiveStatus = "expired";
+  } else if (nowIso > noticeDeadline) {
+    effectiveStatus = c.autoRenew ? "active" : "expiring";
+  } else if (daysUntilNoticeDeadline <= CONTRACT_NOTICE_REMINDER_DAYS) {
+    effectiveStatus = "notice_due_soon";
+  } else {
+    effectiveStatus = "active";
+  }
+  return { noticeDeadline, daysUntilNoticeDeadline, effectiveStatus };
 }
 
 export async function registerRoutes(
@@ -349,6 +386,60 @@ export async function registerRoutes(
   app.delete("/api/catalog-items/:id", requireRole(...PURCHASING_ROLES), async (req, res) => {
     await storage.deleteCatalogItem(Number(req.params.id));
     res.status(204).end();
+  });
+
+  // ---------- Contracts (Verträge) ----------
+  // Commercial/legal data — same sensitivity tier as invoices/orders, so reads are gated too,
+  // not just writes (matching the pattern the prior security review established for those).
+  async function enrichContract(c: Contract) {
+    const [supplier, costCenter] = await Promise.all([
+      storage.getSupplier(c.supplierId),
+      c.costCenterId ? storage.getCostCenter(c.costCenterId) : Promise.resolve(undefined),
+    ]);
+    return {
+      ...c,
+      supplierName: supplier?.name ?? `#${c.supplierId}`,
+      costCenterName: c.costCenterId ? (costCenter?.name ?? `#${c.costCenterId}`) : null,
+      ...contractLifecycle(c, new Date().toISOString()),
+    };
+  }
+
+  app.get("/api/contracts", requireRole(...PURCHASING_ROLES), async (_req, res) => {
+    const list = await storage.listContracts();
+    res.json(await Promise.all(list.map(enrichContract)));
+  });
+
+  app.get("/api/contracts/:id", requireRole(...PURCHASING_ROLES), async (req, res) => {
+    const contract = await storage.getContract(Number(req.params.id));
+    if (!contract) return res.status(404).json({ message: "Vertrag nicht gefunden." });
+    res.json(await enrichContract(contract));
+  });
+
+  app.post("/api/contracts", requireRole(...PURCHASING_ROLES), async (req, res) => {
+    const parsed = insertContractSchema.safeParse({
+      ...req.body,
+      contractNumber: req.body?.contractNumber || genNumber("VTR"),
+      createdAt: new Date().toISOString(),
+      status: "active",
+    });
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+    const contract = await storage.createContract(parsed.data);
+    res.status(201).json(await enrichContract(contract));
+  });
+
+  app.patch("/api/contracts/:id", requireRole(...PURCHASING_ROLES), async (req, res) => {
+    const parsed = insertContractSchema.partial().safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
+
+    const existing = await storage.getContract(Number(req.params.id));
+    if (!existing) return res.status(404).json({ message: "Vertrag nicht gefunden." });
+
+    const patch = { ...parsed.data };
+    if (patch.status === "cancelled" && existing.status !== "cancelled") {
+      patch.cancelledAt = new Date().toISOString();
+    }
+    const updated = await storage.updateContract(existing.id, patch);
+    res.json(await enrichContract(updated!));
   });
 
   // ---------- Purchase requests ----------
@@ -846,6 +937,12 @@ export async function registerRoutes(
       canView: (_parent, actor) => isPurchasingRole(actor.role),
       canUpload: (_parent, actor) => isPurchasingRole(actor.role),
     },
+    contract: {
+      getParent: (id) => storage.getContract(id),
+      notFoundMessage: "Vertrag nicht gefunden.",
+      canView: (_parent, actor) => isPurchasingRole(actor.role),
+      canUpload: (_parent, actor) => isPurchasingRole(actor.role),
+    },
   };
 
   function registerAttachmentRoutes(entityType: keyof typeof ATTACHMENT_PARENTS, routePrefix: string) {
@@ -882,6 +979,7 @@ export async function registerRoutes(
   registerAttachmentRoutes("request", "purchase-requests");
   registerAttachmentRoutes("order", "purchase-orders");
   registerAttachmentRoutes("invoice", "invoices");
+  registerAttachmentRoutes("contract", "contracts");
 
   app.get("/api/attachments/:id/download", async (req, res) => {
     const attachment = await storage.getAttachment(Number(req.params.id));
@@ -1155,6 +1253,27 @@ export async function registerRoutes(
           description: `${inv.invoiceNumber} · ${inv.matchNote}`,
           href: `/invoices`, createdAt: inv.receivedAt,
         });
+      }
+    }
+
+    // Purchasing/finance: contracts whose notice deadline is due soon, already past (still
+    // eligible to lapse/auto-renew), or fully expired — flagged so nothing slips through
+    // unnoticed. Uses `now` as createdAt (not the contract's own createdAt): this is a live
+    // reminder, not a historical event, so it should always read/sort as current.
+    if (isPurchasing) {
+      const nowIso = new Date().toISOString();
+      const contractsList = await storage.listContracts();
+      for (const c of contractsList) {
+        const { effectiveStatus } = contractLifecycle(c, nowIso);
+        if (effectiveStatus === "notice_due_soon" || effectiveStatus === "expiring" || effectiveStatus === "expired") {
+          const title = effectiveStatus === "notice_due_soon" ? "Kündigungsfrist bald fällig"
+            : effectiveStatus === "expiring" ? "Vertrag läuft aus" : "Vertrag abgelaufen";
+          notifications.push({
+            id: `contract-${c.id}`, type: "contract_expiring", title,
+            description: `${c.contractNumber} · ${c.title}`,
+            href: `/contracts`, createdAt: nowIso,
+          });
+        }
       }
     }
 
