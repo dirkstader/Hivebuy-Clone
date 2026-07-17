@@ -177,8 +177,16 @@ export async function registerRoutes(
   app.use("/api", requireAuth);
 
   // ---------- Cost centers & budget periods (Geschäftsjahre) ----------
-  app.get("/api/cost-centers", async (_req, res) => {
-    res.json(await storage.listCostCentersWithActivePeriod());
+  // Budget/spent/committed figures are restricted to approver/finance (see the "Kostenstellen"
+  // nav gate in app-sidebar.tsx) — but every role needs the plain id/name/code list to
+  // populate a cost-center picker when creating a request, so strip the budget fields for
+  // everyone else instead of gating the whole endpoint.
+  app.get("/api/cost-centers", async (req, res) => {
+    const centers = await storage.listCostCentersWithActivePeriod();
+    if (req.user!.role === "approver" || req.user!.role === "finance") {
+      return res.json(centers);
+    }
+    res.json(centers.map(({ id, name, code, owner, city }) => ({ id, name, code, owner, city })));
   });
 
   app.post("/api/cost-centers", requireRole("finance"), async (req, res) => {
@@ -376,17 +384,24 @@ export async function registerRoutes(
     });
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
 
+    // Validate line items BEFORE computing totalAmount — otherwise an invalid item (e.g. a
+    // negative quantity) would be silently dropped from what's persisted while still having
+    // contributed its (bogus) value to the stored total.
+    const validLineItems = Array.isArray(lineItems)
+      ? lineItems
+          .map((li: any) => insertRequestLineItemSchema.safeParse({ ...li, requestId: 0 }))
+          .filter((r: any) => r.success)
+          .map((r: any) => r.data)
+      : [];
+
     const totalAmount = Array.isArray(lineItems)
-      ? lineItems.reduce((sum: number, li: any) => sum + Number(li.quantity) * Number(li.unitPrice), 0)
+      ? validLineItems.reduce((sum: number, li: any) => sum + li.quantity * li.unitPrice, 0)
       : parsed.data.totalAmount;
 
     const request = await storage.createPurchaseRequest({ ...parsed.data, totalAmount });
 
-    if (Array.isArray(lineItems)) {
-      for (const li of lineItems) {
-        const liParsed = insertRequestLineItemSchema.safeParse({ ...li, requestId: request.id });
-        if (liParsed.success) await storage.createLineItem(liParsed.data);
-      }
+    for (const li of validLineItems) {
+      await storage.createLineItem({ ...li, requestId: request.id });
     }
     // Created directly as pending_approval (submit without saving a draft first) → build the
     // approval chain immediately, same as the draft->submit path in PATCH.
@@ -434,6 +449,12 @@ export async function registerRoutes(
         (nextStatus === "ordered" && existing.status === "approved" && isPurchasing);
       if (!allowed) {
         return res.status(403).json({ message: "Für diesen Statuswechsel fehlt die Berechtigung." });
+      }
+      // The "Bestellung auslösen" button is only client-disabled without a supplier — enforce
+      // it here too, otherwise the request flips to "ordered" with no purchase order ever
+      // created (auto-creation below is itself conditional on supplierId) and gets stuck.
+      if (nextStatus === "ordered" && !existing.supplierId) {
+        return res.status(400).json({ message: "Für die Bestellung muss zuerst ein Lieferant hinterlegt werden." });
       }
     } else if (existing.status !== "draft" || (!isOwner && !isPurchasing)) {
       return res.status(403).json({ message: "Für diese Änderung fehlt die Berechtigung." });
@@ -585,11 +606,14 @@ export async function registerRoutes(
   });
 
   // ---------- Purchase orders ----------
-  app.get("/api/purchase-orders", async (_req, res) => {
+  // Operational, purchasing/finance-only data (see the "Bestellungen" nav gate in
+  // app-sidebar.tsx) — every mutation on this resource already requires PURCHASING_ROLES,
+  // the reads were the only unguarded gap.
+  app.get("/api/purchase-orders", requireRole(...PURCHASING_ROLES), async (_req, res) => {
     res.json(await storage.listPurchaseOrders());
   });
 
-  app.get("/api/purchase-orders/:id", async (req, res) => {
+  app.get("/api/purchase-orders/:id", requireRole(...PURCHASING_ROLES), async (req, res) => {
     const order = await storage.getPurchaseOrder(Number(req.params.id));
     if (!order) return res.status(404).json({ message: "Bestellung nicht gefunden." });
     const { lines, orderedValue, receivedValue, fullyReceived } = await orderReceiptState(order.id, order.requestId);
@@ -686,11 +710,14 @@ export async function registerRoutes(
   });
 
   // ---------- Invoices (3-way match) ----------
-  app.get("/api/invoices", async (_req, res) => {
+  // Operational, purchasing/finance-only data (see the "Rechnungsabgleich" nav gate in
+  // app-sidebar.tsx) — every mutation on this resource already requires PURCHASING_ROLES,
+  // the reads were the only unguarded gap.
+  app.get("/api/invoices", requireRole(...PURCHASING_ROLES), async (_req, res) => {
     res.json(await storage.listInvoices());
   });
 
-  app.get("/api/invoices/:id", async (req, res) => {
+  app.get("/api/invoices/:id", requireRole(...PURCHASING_ROLES), async (req, res) => {
     const invoice = await storage.getInvoice(Number(req.params.id));
     if (!invoice) return res.status(404).json({ message: "Rechnung nicht gefunden." });
     res.json(invoice);
@@ -754,8 +781,23 @@ export async function registerRoutes(
   app.patch("/api/invoices/:id", requireRole(...PURCHASING_ROLES), async (req, res) => {
     const parsed = insertInvoiceSchema.partial().safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
-    const updated = await storage.updateInvoice(Number(req.params.id), parsed.data);
+
+    const existing = await storage.getInvoice(Number(req.params.id));
+    if (!existing) return res.status(404).json({ message: "Rechnung nicht gefunden." });
+
+    const updated = await storage.updateInvoice(existing.id, parsed.data);
     if (!updated) return res.status(404).json({ message: "Rechnung nicht gefunden." });
+
+    // A corrected amount must also correct the budget period's booked spend — otherwise
+    // `spent` permanently desyncs from the invoice's real amount with no reconciliation path.
+    if (parsed.data.amount !== undefined && parsed.data.amount !== existing.amount) {
+      const order = await storage.getPurchaseOrder(existing.orderId);
+      const commitment = order && (await storage.getCommitmentByRequest(order.requestId));
+      if (commitment) {
+        await storage.updatePeriodSpent(commitment.periodId, parsed.data.amount - existing.amount);
+      }
+    }
+
     res.json(updated);
   });
 

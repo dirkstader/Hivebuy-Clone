@@ -57,4 +57,26 @@ describe("auth", () => {
       .set("Authorization", `Bearer ${login.body.token}`);
     expect(res.status).toBe(200);
   });
+
+  it("normalizes a mixed-case email to lowercase on creation, so login (which always "
+    + "lowercases first) doesn't permanently lock the new account out", async () => {
+    const finance = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "dirk@stader.de", password: "demo1234" });
+    const create = await request(app)
+      .post("/api/users")
+      .set("Authorization", `Bearer ${finance.body.token}`)
+      .send({
+        name: "Anna Müller", email: "Anna.Mueller@Firma.de", password: "demo1234",
+        role: "requester", department: "", costCenterId: null,
+      });
+    expect(create.status).toBe(201);
+    expect(create.body.email).toBe("anna.mueller@firma.de");
+
+    const login = await request(app)
+      .post("/api/auth/login")
+      .send({ email: "Anna.Mueller@Firma.de", password: "demo1234" });
+    expect(login.status).toBe(200);
+    expect(login.body.user.email).toBe("anna.mueller@firma.de");
+  });
 });

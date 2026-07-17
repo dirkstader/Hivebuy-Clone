@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { Paperclip, Upload, Download, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -36,8 +36,9 @@ export function AttachmentsPanel({ entityType, entityId }: AttachmentsPanelProps
   const routePrefix = ROUTE_PREFIX[entityType];
   const queryKey = [`/api/${routePrefix}`, entityId, "attachments"];
 
-  const { data: attachments, isLoading } = useQuery<Attachment[]>({ queryKey });
+  const { data: attachments, isLoading, isError } = useQuery<Attachment[]>({ queryKey });
   const isPurchasing = user?.role === "purchasing" || user?.role === "finance";
+  const [downloadingId, setDownloadingId] = useState<number | null>(null);
 
   const upload = useMutation({
     mutationFn: async (file: File) => {
@@ -65,6 +66,8 @@ export function AttachmentsPanel({ entityType, entityId }: AttachmentsPanelProps
   });
 
   const download = async (attachment: Attachment) => {
+    if (downloadingId !== null) return; // guard against double-click firing two save-file actions
+    setDownloadingId(attachment.id);
     try {
       const res = await apiRequest("GET", `/api/attachments/${attachment.id}/download`);
       const blob = await res.blob();
@@ -76,6 +79,8 @@ export function AttachmentsPanel({ entityType, entityId }: AttachmentsPanelProps
       URL.revokeObjectURL(url);
     } catch {
       toast({ title: "Download fehlgeschlagen", variant: "destructive" });
+    } finally {
+      setDownloadingId(null);
     }
   };
 
@@ -102,7 +107,11 @@ export function AttachmentsPanel({ entityType, entityId }: AttachmentsPanelProps
         <Upload className="h-3.5 w-3.5" /> Datei hochladen
       </Button>
 
-      {isLoading ? null : (attachments ?? []).length === 0 ? (
+      {isLoading ? null : isError ? (
+        <p className="text-sm text-destructive" data-testid="text-attachments-error">
+          Anhänge konnten nicht geladen werden (fehlende Berechtigung?).
+        </p>
+      ) : (attachments ?? []).length === 0 ? (
         <p className="text-sm text-muted-foreground" data-testid="text-no-attachments">Keine Anhänge vorhanden.</p>
       ) : (
         <ul className="space-y-1.5">
@@ -122,7 +131,12 @@ export function AttachmentsPanel({ entityType, entityId }: AttachmentsPanelProps
                 </div>
               </div>
               <div className="flex items-center gap-1 shrink-0">
-                <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => download(a)} data-testid={`button-download-attachment-${a.id}`}>
+                <Button
+                  variant="ghost" size="icon" className="h-7 w-7"
+                  onClick={() => download(a)}
+                  disabled={downloadingId !== null}
+                  data-testid={`button-download-attachment-${a.id}`}
+                >
                   <Download className="h-3.5 w-3.5" />
                 </Button>
                 {(a.uploadedById === user?.id || isPurchasing) && (
@@ -141,7 +155,7 @@ export function AttachmentsPanel({ entityType, entityId }: AttachmentsPanelProps
                       </AlertDialogHeader>
                       <AlertDialogFooter>
                         <AlertDialogCancel>Abbrechen</AlertDialogCancel>
-                        <AlertDialogAction onClick={() => remove.mutate(a.id)}>Löschen</AlertDialogAction>
+                        <AlertDialogAction disabled={remove.isPending} onClick={() => remove.mutate(a.id)}>Löschen</AlertDialogAction>
                       </AlertDialogFooter>
                     </AlertDialogContent>
                   </AlertDialog>

@@ -98,6 +98,39 @@ describe("invoice 3-way match (order ↔ goods receipt ↔ invoice)", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects a non-positive invoice amount", async () => {
+    const { order } = await freshOrder("Negativbetrag-Test", 1, 100);
+    const res = await request(app)
+      .post("/api/invoices")
+      .set(...auth(jana.token))
+      .send({ invoiceNumber: "RE-NEG", orderId: order.id, supplierId: 1, amount: -50 });
+    expect(res.status).toBe(400);
+  });
+
+  it("keeps the budget period's spent figure in sync when an invoice amount is corrected afterward", async () => {
+    const { order, lineItemId } = await freshOrder("Korrektur-Test", 1, 200);
+    await request(app)
+      .post(`/api/purchase-orders/${order.id}/receipts`)
+      .set(...auth(jana.token))
+      .send({ lines: [{ requestLineItemId: lineItemId, quantityReceived: 1 }] });
+    const created = await request(app)
+      .post("/api/invoices")
+      .set(...auth(jana.token))
+      .send({ invoiceNumber: "RE-KORR", orderId: order.id, supplierId: 1, amount: order.totalAmount });
+    expect(created.status).toBe(201);
+
+    const before = (await request(app).get("/api/cost-centers").set(...auth(sabine.token))).body.find((c: any) => c.id === 1);
+
+    const patch = await request(app)
+      .patch(`/api/invoices/${created.body.id}`)
+      .set(...auth(jana.token))
+      .send({ amount: order.totalAmount + 50 });
+    expect(patch.status).toBe(200);
+
+    const after = (await request(app).get("/api/cost-centers").set(...auth(sabine.token))).body.find((c: any) => c.id === 1);
+    expect(after.spent).toBeCloseTo(before.spent + 50, 2);
+  });
+
   it("rejects a second invoice against an order that already has one", async () => {
     const { order, lineItemId } = await freshOrder("Duplikat-Test", 1, 300);
     await request(app)

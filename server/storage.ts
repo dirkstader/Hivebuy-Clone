@@ -107,6 +107,10 @@ export interface IStorage {
   // Budget commitments (Obligo)
   createBudgetCommitment(c: InsertBudgetCommitment): Promise<BudgetCommitment>;
   getReservedCommitmentByRequest(requestId: number): Promise<BudgetCommitment | undefined>;
+  // A request has at most one commitment ever (created once at final approval), regardless of
+  // its current status (reserved | realized | released) — used to find which budget period an
+  // already-invoiced request's spend was booked into.
+  getCommitmentByRequest(requestId: number): Promise<BudgetCommitment | undefined>;
   updateBudgetCommitment(id: number, c: Partial<InsertBudgetCommitment>): Promise<BudgetCommitment | undefined>;
 
   // Goods receipts
@@ -135,10 +139,12 @@ export interface IStorage {
 
 export class DatabaseStorage implements IStorage {
   async getUser(id: number) { return db.select().from(users).where(eq(users.id, id)).get(); }
-  async getUserByEmail(email: string) { return db.select().from(users).where(eq(users.email, email)).get(); }
+  // SQLite's default collation is case-sensitive, and login always lowercases before lookup —
+  // normalize here too so a caller that forgets to lowercase still finds the right row.
+  async getUserByEmail(email: string) { return db.select().from(users).where(eq(users.email, email.toLowerCase())).get(); }
   async listUsers() { return db.select().from(users).all(); }
   async createUser(u: InsertUser) {
-    return db.insert(users).values({ ...u, password: await hashPassword(u.password) }).returning().get();
+    return db.insert(users).values({ ...u, email: u.email.toLowerCase(), password: await hashPassword(u.password) }).returning().get();
   }
 
   async listCostCenters() { return db.select().from(costCenters).all(); }
@@ -176,7 +182,7 @@ export class DatabaseStorage implements IStorage {
   async updatePeriodSpent(id: number, delta: number) {
     const p = await this.getBudgetPeriod(id);
     if (!p) return;
-    db.update(budgetPeriods).set({ spent: p.spent + delta }).where(eq(budgetPeriods.id, id)).run();
+    db.update(budgetPeriods).set({ spent: Math.max(0, p.spent + delta) }).where(eq(budgetPeriods.id, id)).run();
   }
   async updatePeriodCommitted(id: number, delta: number) {
     const p = await this.getBudgetPeriod(id);
@@ -212,6 +218,9 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createBudgetCommitment(c: InsertBudgetCommitment) { return db.insert(budgetCommitments).values(c).returning().get(); }
+  async getCommitmentByRequest(requestId: number) {
+    return db.select().from(budgetCommitments).where(eq(budgetCommitments.requestId, requestId)).get();
+  }
   async getReservedCommitmentByRequest(requestId: number) {
     return db.select().from(budgetCommitments)
       .where(and(eq(budgetCommitments.requestId, requestId), eq(budgetCommitments.status, "reserved")))

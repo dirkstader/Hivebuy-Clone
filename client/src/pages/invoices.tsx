@@ -78,6 +78,8 @@ export default function Invoices() {
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard/summary"] });
       queryClient.invalidateQueries({ queryKey: ["/api/cost-centers"] });
       queryClient.invalidateQueries({ queryKey: ["/api/notifications"] });
+      // The 3-way match can flip a supplier's discrepancy rate — keep the scorecard fresh.
+      queryClient.invalidateQueries({ queryKey: ["/api/suppliers/scorecards"] });
       toast({ title: "Rechnung erfasst und abgeglichen" });
       setDialogOpen(false);
       form.reset();

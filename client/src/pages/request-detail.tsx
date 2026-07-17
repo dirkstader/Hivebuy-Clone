@@ -75,6 +75,8 @@ export default function RequestDetail() {
     queryClient.invalidateQueries({ queryKey: ["/api/cost-centers"] });
     queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
     queryClient.invalidateQueries({ queryKey: ["/api/notifications"] });
+    // Booking a goods receipt can change a supplier's on-time/complete rate.
+    queryClient.invalidateQueries({ queryKey: ["/api/suppliers/scorecards"] });
   };
 
   const transition = useMutation({

@@ -263,4 +263,51 @@ describe("purchase request approval workflow", () => {
     const after = await request(app).get(`/api/purchase-requests/${id}`).set(...auth(lea.token));
     expect(after.body.status).toBe("pending_approval");
   });
+
+  it("drops a negative-quantity line item instead of letting it corrupt the stored totalAmount", async () => {
+    const create = await request(app)
+      .post("/api/purchase-requests")
+      .set(...auth(lea.token))
+      .send({
+        costCenterId: 1,
+        title: "Negativmengen-Test",
+        status: "draft",
+        lineItems: [
+          { description: "Gültiger Artikel", quantity: 2, unitPrice: 50 }, // 100 €
+          { description: "Negative Menge", quantity: -100, unitPrice: 50 }, // must be dropped entirely
+        ],
+      });
+    expect(create.status).toBe(201);
+    // Only the valid line survives, and totalAmount reflects only that line — not
+    // 100 + (-100 * 50) = -4900 from summing the raw, unvalidated input.
+    expect(create.body.totalAmount).toBe(100);
+
+    const detail = await request(app).get(`/api/purchase-requests/${create.body.id}`).set(...auth(lea.token));
+    expect(detail.body.lineItems).toHaveLength(1);
+    expect(detail.body.lineItems[0].description).toBe("Gültiger Artikel");
+  });
+
+  it("blocks ordering an approved request with no supplier set instead of leaving it stuck with no purchase order", async () => {
+    const create = await request(app)
+      .post("/api/purchase-requests")
+      .set(...auth(lea.token))
+      .send({
+        costCenterId: 1,
+        // supplierId intentionally omitted — supplier selection is optional at creation time.
+        title: "Kein-Lieferant-Test",
+        status: "pending_approval",
+        lineItems: [{ description: "Artikel", quantity: 1, unitPrice: 100 }],
+      });
+    const id = create.body.id;
+    await request(app).post(`/api/purchase-requests/${id}/decision`).set(...auth(sabine.token)).send({ decision: "approved" });
+
+    const order = await request(app)
+      .patch(`/api/purchase-requests/${id}`)
+      .set(...auth(jana.token))
+      .send({ status: "ordered" });
+    expect(order.status).toBe(400);
+
+    const after = await request(app).get(`/api/purchase-requests/${id}`).set(...auth(lea.token));
+    expect(after.body.status).toBe("approved"); // unchanged — did not silently flip to "ordered"
+  });
 });

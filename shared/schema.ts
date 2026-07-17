@@ -16,7 +16,11 @@ export const users = sqliteTable("users", {
   costCenterId: integer("cost_center_id"),
 });
 
-export const insertUserSchema = createInsertSchema(users).omit({ id: true });
+// Login always lowercases the email before lookup — normalize it the same way at creation
+// time, otherwise a mixed-case email is stored as-is and can never match on login again.
+export const insertUserSchema = createInsertSchema(users).omit({ id: true }).extend({
+  email: z.string().min(1).transform((v) => v.trim().toLowerCase()),
+});
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
 
@@ -140,7 +144,12 @@ export const purchaseRequests = sqliteTable("purchase_requests", {
   decidedAt: text("decided_at"),
 });
 
-export const insertPurchaseRequestSchema = createInsertSchema(purchaseRequests).omit({ id: true });
+// Optional (not required) to match the original drizzle-zod-derived shape: the client never
+// sends totalAmount directly, it's computed server-side from lineItems (see routes.ts) — this
+// only guards the fallback path where a request is created/patched without a lineItems array.
+export const insertPurchaseRequestSchema = createInsertSchema(purchaseRequests).omit({ id: true }).extend({
+  totalAmount: z.number().nonnegative().optional(),
+});
 export type InsertPurchaseRequest = z.infer<typeof insertPurchaseRequestSchema>;
 export type PurchaseRequest = typeof purchaseRequests.$inferSelect;
 
@@ -154,7 +163,10 @@ export const requestLineItems = sqliteTable("request_line_items", {
   unitPrice: real("unit_price").notNull().default(0),
 });
 
-export const insertRequestLineItemSchema = createInsertSchema(requestLineItems).omit({ id: true });
+export const insertRequestLineItemSchema = createInsertSchema(requestLineItems).omit({ id: true }).extend({
+  quantity: z.number().positive(),
+  unitPrice: z.number().nonnegative(),
+});
 export type InsertRequestLineItem = z.infer<typeof insertRequestLineItemSchema>;
 export type RequestLineItem = typeof requestLineItems.$inferSelect;
 
@@ -194,7 +206,9 @@ export const invoices = sqliteTable("invoices", {
   paidAt: text("paid_at"),
 });
 
-export const insertInvoiceSchema = createInsertSchema(invoices).omit({ id: true });
+export const insertInvoiceSchema = createInsertSchema(invoices).omit({ id: true }).extend({
+  amount: z.number().positive(),
+});
 export type InsertInvoice = z.infer<typeof insertInvoiceSchema>;
 export type Invoice = typeof invoices.$inferSelect;
 

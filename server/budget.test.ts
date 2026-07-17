@@ -10,8 +10,10 @@ describe("budget commitments (reserve on approval, realize on invoice)", () => {
   let jana: Awaited<ReturnType<typeof loginAs>>; // purchasing
 
   const auth = (token: string) => ["Authorization", `Bearer ${token}`] as [string, string];
+  // The full budget/spent/committed breakdown is restricted to approver/finance (purchasing
+  // only gets the identity fields) — use sabine's token for these read-only assertions.
   const costCenter = async (id: number) => {
-    const res = await request(app).get("/api/cost-centers").set(...auth(jana.token));
+    const res = await request(app).get("/api/cost-centers").set(...auth(sabine.token));
     return res.body.find((c: any) => c.id === id);
   };
 

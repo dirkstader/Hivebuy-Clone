@@ -24,6 +24,10 @@ export default function CostCenters() {
   const [nextBudget, setNextBudget] = useState("");
 
   const canManage = user?.role === "finance";
+  // The API only returns the budget/spent/committed breakdown to approver/finance (see
+  // GET /api/cost-centers in server/routes.ts) — reaching this page any other way (direct
+  // navigation, bookmark) would otherwise render every field as undefined/NaN.
+  const canViewBudgets = user?.role === "approver" || user?.role === "finance";
 
   const rollover = useMutation({
     mutationFn: async () => {
@@ -33,6 +37,7 @@ export default function CostCenters() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/cost-centers"] });
       queryClient.invalidateQueries({ queryKey: ["/api/dashboard/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/analytics"] });
       toast({ title: "Neues Geschäftsjahr eröffnet" });
       setRolloverTarget(null);
       setNextBudget("");
@@ -47,7 +52,11 @@ export default function CostCenters() {
         <p className="text-sm text-muted-foreground mt-1">Budgetverbrauch je Kostenstelle im laufenden Geschäftsjahr.</p>
       </div>
 
-      {isLoading ? (
+      {!canViewBudgets ? (
+        <p className="text-sm text-muted-foreground" data-testid="text-access-denied">
+          Für diese Ansicht fehlt die Berechtigung.
+        </p>
+      ) : isLoading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-28 w-full" />)}
         </div>
