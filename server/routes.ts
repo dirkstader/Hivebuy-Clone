@@ -122,6 +122,10 @@ async function orderReceiptState(orderId: number, requestId: number) {
   return { lines, orderedValue, receivedValue, anyReceived, fullyReceived };
 }
 
+function clamp01(n: number): number {
+  return Math.max(0, Math.min(1, n));
+}
+
 function genNumber(prefix: string) {
   const year = new Date().getFullYear();
   const seq = Math.floor(1000 + Math.random() * 9000);
@@ -1008,7 +1012,29 @@ export async function registerRoutes(
       return acc;
     }, {});
 
-    res.json({ spendByCostCenter, spendBySupplier, spendByMonth, requestsByStatus });
+    // Budget vs. Ist: every cost center's actual (spent+committed) against its annual budget,
+    // plus how far through its fiscal period "today" is (elapsedPct) so the client can flag
+    // cost centers spending faster than the year is passing (pacing), not just over budget.
+    const now = Date.now();
+    const budgetVariance = costCenters.map((c) => {
+      const actual = c.spent + c.committed;
+      const variance = c.annualBudget - actual;
+      const variancePct = c.annualBudget > 0 ? (actual / c.annualBudget) * 100 : 0;
+      const start = new Date(c.periodStartsAt).getTime();
+      const end = new Date(c.periodEndsAt).getTime();
+      const elapsedPct = end > start ? clamp01((now - start) / (end - start)) * 100 : 0;
+      return { id: c.id, name: c.name, code: c.code, annualBudget: c.annualBudget, actual, variance, variancePct, elapsedPct };
+    });
+    const totalBudget = budgetVariance.reduce((s, c) => s + c.annualBudget, 0);
+    const totalActual = budgetVariance.reduce((s, c) => s + c.actual, 0);
+    const budgetSummary = {
+      totalBudget, totalActual,
+      variance: totalBudget - totalActual,
+      variancePct: totalBudget > 0 ? (totalActual / totalBudget) * 100 : 0,
+      overBudgetCount: budgetVariance.filter((c) => c.variance < 0).length,
+    };
+
+    res.json({ spendByCostCenter, spendBySupplier, spendByMonth, requestsByStatus, budgetVariance, budgetSummary });
   });
 
   // ---------- Approval delegations (Freigabe-Vertretung) ----------
