@@ -246,14 +246,17 @@ export const insertInvoiceSchema = createInsertSchema(invoices).omit({ id: true 
 export type InsertInvoice = z.infer<typeof insertInvoiceSchema>;
 export type Invoice = typeof invoices.$inferSelect;
 
-// ---------- Amazon Business Punch-Out (simulated cXML/OCI session) ----------
-// In production this session is created via a real cXML PunchOutSetupRequest to
-// Amazon Business and the returned StartPage URL is opened for the user. The
-// PunchOutOrderMessage callback then posts the selected cart back here.
+// ---------- Amazon Business Punch-Out (cXML session, real protocol against a mock supplier) ----------
+// The session is created via a real cXML PunchOutSetupRequest sent to a supplier endpoint
+// (server/punchout-cxml.ts) — by default our own built-in mock, or the real Amazon Business
+// endpoint once PUNCHOUT_SUPPLIER_SETUP_URL is configured. buyerCookie is the cXML correlation
+// token: embedded in the outgoing request, echoed back in the PunchOutOrderMessage callback so
+// the returned cart can be matched to this session without relying on a guessable numeric id.
 export const punchoutSessions = sqliteTable("punchout_sessions", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   requestId: integer("request_id"), // draft request this session is attached to, if any
   userId: integer("user_id").notNull(),
+  buyerCookie: text("buyer_cookie").notNull().unique(),
   status: text("status").notNull().default("pending"), // pending | returned | cancelled
   cartJson: text("cart_json").notNull().default("[]"), // JSON array of returned line items
   createdAt: text("created_at").notNull(),

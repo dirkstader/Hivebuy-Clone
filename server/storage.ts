@@ -140,6 +140,7 @@ export interface IStorage {
   // Amazon Business punch-out sessions
   createPunchoutSession(p: InsertPunchoutSession): Promise<PunchoutSession>;
   getPunchoutSession(id: number): Promise<PunchoutSession | undefined>;
+  getPunchoutSessionByBuyerCookie(buyerCookie: string): Promise<PunchoutSession | undefined>;
   updatePunchoutSession(id: number, p: Partial<InsertPunchoutSession>): Promise<PunchoutSession | undefined>;
 }
 
@@ -353,6 +354,9 @@ export class DatabaseStorage implements IStorage {
 
   async createPunchoutSession(p: InsertPunchoutSession) { return db.insert(punchoutSessions).values(p).returning().get(); }
   async getPunchoutSession(id: number) { return db.select().from(punchoutSessions).where(eq(punchoutSessions.id, id)).get(); }
+  async getPunchoutSessionByBuyerCookie(buyerCookie: string) {
+    return db.select().from(punchoutSessions).where(eq(punchoutSessions.buyerCookie, buyerCookie)).get();
+  }
   async updatePunchoutSession(id: number, p: Partial<InsertPunchoutSession>) {
     return db.update(punchoutSessions).set(p).where(eq(punchoutSessions.id, id)).returning().get();
   }

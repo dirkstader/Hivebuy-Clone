@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Plus, Trash2, ShoppingCart, PackageSearch } from "lucide-react";
@@ -14,9 +14,9 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { formatCurrency } from "@/lib/format";
 import { useAuth } from "@/lib/auth-context";
-import { AmazonPunchoutDialog } from "@/components/amazon-punchout-dialog";
+import { stashPunchoutDraft, takePunchoutDraft } from "@/lib/punchout-draft";
 import { SupplierCatalogDialog } from "@/components/supplier-catalog-dialog";
-import type { CostCenter, Supplier } from "@shared/schema";
+import type { CostCenter, Supplier, PunchoutCartLine } from "@shared/schema";
 
 interface DraftLine {
   description: string;
@@ -34,8 +34,8 @@ export default function RequestNew() {
   const [costCenterId, setCostCenterId] = useState<string>(user?.costCenterId ? String(user.costCenterId) : "");
   const [supplierId, setSupplierId] = useState<string>("");
   const [lines, setLines] = useState<DraftLine[]>([{ description: "", quantity: 1, unitPrice: 0 }]);
-  const [amazonOpen, setAmazonOpen] = useState(false);
   const [catalogOpen, setCatalogOpen] = useState(false);
+  const [punchoutLoading, setPunchoutLoading] = useState(false);
 
   const { data: costCenters } = useQuery<CostCenter[]>({ queryKey: ["/api/cost-centers"] });
   const { data: suppliers } = useQuery<Supplier[]>({ queryKey: ["/api/suppliers"] });
@@ -48,12 +48,54 @@ export default function RequestNew() {
   const removeLine = (index: number) => setLines((prev) => prev.filter((_, i) => i !== index));
   const addLine = () => setLines((prev) => [...prev, { description: "", quantity: 1, unitPrice: 0 }]);
 
-  const importAmazonLines = (imported: DraftLine[]) => {
-    setLines((prev) => {
-      const withoutEmpty = prev.filter((l) => l.description.trim() !== "" || l.unitPrice > 0);
-      return [...withoutEmpty, ...imported];
-    });
-    toast({ title: "Amazon-Warenkorb übernommen", description: `${imported.length} Position(en) hinzugefügt.` });
+  // Restore a draft stashed before leaving for the punch-out shop page, and — if that trip
+  // completed — pull the returned Amazon cart in as line items. See client/src/lib/punchout-draft
+  // for why this travels via a module-level variable rather than sessionStorage/the URL.
+  useEffect(() => {
+    const draft = takePunchoutDraft();
+    if (!draft) return;
+    setTitle(draft.title);
+    setJustification(draft.justification);
+    setCostCenterId(draft.costCenterId);
+    setSupplierId(draft.supplierId);
+    setLines(draft.lines);
+    if (draft.returnedSessionId == null) return;
+    (async () => {
+      try {
+        const res = await apiRequest("GET", `/api/punchout/sessions/${draft.returnedSessionId}`);
+        const session = await res.json();
+        if (session.status !== "returned") return;
+        const cart: PunchoutCartLine[] = JSON.parse(session.cartJson);
+        const imported: DraftLine[] = cart.map((l) => ({
+          description: `${l.name} (Amazon ASIN ${l.sku})`,
+          quantity: l.quantity,
+          unitPrice: l.unitPrice,
+        }));
+        setLines((prev) => {
+          const withoutEmpty = prev.filter((l) => l.description.trim() !== "" || l.unitPrice > 0);
+          return [...withoutEmpty, ...imported];
+        });
+        toast({ title: "Amazon-Warenkorb übernommen", description: `${imported.length} Position(en) hinzugefügt.` });
+      } catch {
+        toast({ title: "Fehler", description: "Amazon-Warenkorb konnte nicht geladen werden.", variant: "destructive" });
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const startPunchout = async () => {
+    setPunchoutLoading(true);
+    try {
+      const res = await apiRequest("POST", "/api/punchout/setup", {});
+      const { startPageUrl } = await res.json();
+      const path = new URL(startPageUrl).hash.slice(1); // "/punchout/shop/<buyerCookie>"
+      const buyerCookie = path.split("/").pop() ?? "";
+      stashPunchoutDraft({ buyerCookie, title, justification, costCenterId, supplierId, lines });
+      navigate(path);
+    } catch {
+      toast({ title: "Fehler", description: "Amazon-Business-Sitzung konnte nicht gestartet werden.", variant: "destructive" });
+      setPunchoutLoading(false);
+    }
   };
 
   const importCatalogLines = (imported: DraftLine[]) => {
@@ -154,7 +196,7 @@ export default function RequestNew() {
             >
               <PackageSearch className="h-4 w-4" /> Aus Katalog wählen
             </Button>
-            <Button variant="outline" size="sm" onClick={() => setAmazonOpen(true)} data-testid="button-open-amazon-punchout">
+            <Button variant="outline" size="sm" onClick={startPunchout} disabled={punchoutLoading} data-testid="button-open-amazon-punchout">
               <ShoppingCart className="h-4 w-4" /> Bei Amazon Business einkaufen
             </Button>
           </div>
@@ -225,7 +267,6 @@ export default function RequestNew() {
         </Button>
       </div>
 
-      <AmazonPunchoutDialog open={amazonOpen} onOpenChange={setAmazonOpen} onImport={importAmazonLines} />
       <SupplierCatalogDialog
         open={catalogOpen}
         onOpenChange={setCatalogOpen}

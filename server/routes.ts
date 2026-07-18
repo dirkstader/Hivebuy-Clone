@@ -1,16 +1,22 @@
 import type { Express, Request, Response, NextFunction } from "express";
+import express from "express";
 import { createServer } from 'node:http';
 import type { Server } from 'node:http';
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import { z } from "zod";
 import rateLimit from "express-rate-limit";
 import { storage } from "./storage";
 import { seedIfEmpty } from "./seed";
 import { AMAZON_CATALOG } from "./amazon-catalog";
+import {
+  buildSetupRequestCxml, parseSetupRequestCxml, buildSetupResponseCxml, parseSetupResponseCxml,
+  buildOrderMessageCxml, parseOrderMessageCxml,
+} from "./punchout-cxml";
 import { verifyPassword } from "./password";
 import { createSession, destroySession, requireAuth, requireRole, sanitizeUser } from "./auth";
 import { upload, attachmentPath } from "./uploads";
-import type { User, Contract } from "@shared/schema";
+import type { User, Contract, PunchoutCartLine } from "@shared/schema";
 import {
   insertUserSchema, createCostCenterRequestSchema, insertSupplierSchema, insertCatalogItemSchema,
   insertPurchaseRequestSchema, insertRequestLineItemSchema, insertPurchaseOrderSchema, insertInvoiceSchema,
@@ -169,6 +175,47 @@ function contractLifecycle(c: Contract, nowIso: string): {
   return { noticeDeadline, daysUntilNoticeDeadline, effectiveStatus };
 }
 
+// ---------- Amazon Business Punch-Out (cXML) ----------
+// Unset PUNCHOUT_SUPPLIER_SETUP_URL = talk to our own built-in mock supplier below (demo mode).
+// Set it to Amazon's real cXML endpoint + real PUNCHOUT_SHARED_SECRET/PUNCHOUT_OUR_IDENTITY to
+// go live — see mockAmazonSetupResponse for the one function that stops being used at that point.
+const PUNCHOUT_SHARED_SECRET = process.env.PUNCHOUT_SHARED_SECRET || "demo-shared-secret";
+const PUNCHOUT_OUR_IDENTITY = process.env.PUNCHOUT_OUR_IDENTITY || "OUNDA-PROCURE";
+
+function resolveAppOrigin(req: Request): string {
+  return process.env.APP_ORIGIN || `${req.protocol}://${req.get("host")}`;
+}
+
+// Plays the role of Amazon Business's own setup endpoint: stateless (a real Amazon has no
+// access to our DB), just validates the shared secret and hands back a StartPage URL. This
+// function — and the whole mock-amazon namespace — is what gets deleted once real Amazon
+// credentials + PUNCHOUT_SUPPLIER_SETUP_URL are configured.
+function mockAmazonSetupResponse(requestCxml: string, appOrigin: string): string {
+  const parsed = parseSetupRequestCxml(requestCxml, PUNCHOUT_SHARED_SECRET);
+  if (!parsed.sharedSecretOk || !parsed.buyerCookie) {
+    throw new Error("Ungültige PunchOutSetupRequest (Shared Secret oder BuyerCookie fehlt).");
+  }
+  return buildSetupResponseCxml({ startPageUrl: `${appOrigin}/#/punchout/shop/${parsed.buyerCookie}` });
+}
+
+// The real, reusable buyer-side call: swap the fetch target for Amazon's real cXML endpoint
+// and this is the only function that changes.
+async function sendSetupRequestToSupplier(requestCxml: string, appOrigin: string): Promise<string> {
+  const supplierUrl = process.env.PUNCHOUT_SUPPLIER_SETUP_URL;
+  if (supplierUrl) {
+    const res = await fetch(supplierUrl, {
+      method: "POST",
+      headers: { "Content-Type": "text/xml" },
+      body: requestCxml,
+    });
+    if (!res.ok) throw new Error(`Punch-Out-Lieferant antwortete mit Status ${res.status}.`);
+    return res.text();
+  }
+  // Demo default: no external supplier configured, call the mock in-process (no self-network
+  // call — keeps this deterministic under supertest, which never binds a real listening port).
+  return mockAmazonSetupResponse(requestCxml, appOrigin);
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express
@@ -212,6 +259,49 @@ export async function registerRoutes(
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
     const user = await storage.createUser(parsed.data);
     res.status(201).json(sanitizeUser(user));
+  });
+
+  // Unauthenticated by design: these three stand in for (or receive calls from) an external
+  // actor — Amazon Business — which has no knowledge of our internal Bearer tokens. Keeping
+  // that true here is exactly what keeps the real Amazon swap-in a config change, not a rewrite.
+  app.post("/api/punchout/mock-amazon/setup", express.text({ type: "*/xml", limit: "512kb" }), async (req, res) => {
+    try {
+      const responseCxml = mockAmazonSetupResponse(req.body, resolveAppOrigin(req));
+      res.type("text/xml").send(responseCxml);
+    } catch (err: any) {
+      res.status(400).json({ message: err?.message ?? "Ungültige PunchOutSetupRequest." });
+    }
+  });
+
+  app.post("/api/punchout/mock-amazon/checkout", async (req, res) => {
+    const buyerCookie = String(req.body?.buyerCookie ?? "");
+    const cart: PunchoutCartLine[] = Array.isArray(req.body?.cart) ? req.body.cart : [];
+    if (!buyerCookie) return res.status(400).json({ message: "buyerCookie fehlt." });
+    const session = await storage.getPunchoutSessionByBuyerCookie(buyerCookie);
+    if (!session || session.status !== "pending") {
+      return res.status(404).json({ message: "Punch-Out-Sitzung nicht gefunden oder bereits abgeschlossen." });
+    }
+    const cxml = buildOrderMessageCxml({ buyerCookie, cart });
+    res.json({ cxml });
+  });
+
+  app.post("/api/punchout/callback", async (req, res) => {
+    try {
+      const { buyerCookie, lines } = parseOrderMessageCxml(String(req.body?.cxml ?? ""));
+      const session = await storage.getPunchoutSessionByBuyerCookie(buyerCookie);
+      if (!session) return res.status(404).json({ message: "Punch-Out-Sitzung nicht gefunden." });
+      if (session.status !== "pending") {
+        return res.status(409).json({ message: "Punch-Out-Sitzung wurde bereits abgeschlossen." });
+      }
+      const updated = await storage.updatePunchoutSession(session.id, {
+        status: "returned",
+        cartJson: JSON.stringify(lines),
+        returnedAt: new Date().toISOString(),
+      });
+      res.json({ sessionId: updated!.id });
+    } catch (err: any) {
+      res.status(400).json({ message: err?.message ?? "Ungültige PunchOutOrderMessage." });
+    }
   });
 
   // ---------- Everything below requires a valid session ----------
@@ -1007,44 +1097,50 @@ export async function registerRoutes(
     res.status(204).end();
   });
 
-  // ---------- Amazon Business Punch-Out (simulated cXML/OCI) ----------
-  // Real flow: POST here would instead send a cXML PunchOutSetupRequest to
-  // Amazon Business and return their StartPage URL. We simulate the round-trip
-  // by handing back our own in-app catalog "session" immediately.
-  app.post("/api/punchout/sessions", async (req, res) => {
+  // ---------- Amazon Business Punch-Out (real cXML) ----------
+  // Generates a real PunchOutSetupRequest and sends it to the configured supplier (our own
+  // mock by default — see sendSetupRequestToSupplier above). Going live with real Amazon
+  // credentials only ever touches that one function, not this route.
+  app.post("/api/punchout/setup", async (req, res) => {
+    const buyerCookie = randomBytes(24).toString("hex");
+    const appOrigin = resolveAppOrigin(req);
     const parsed = insertPunchoutSessionSchema.safeParse({
       requestId: req.body?.requestId ?? null,
       userId: req.user!.id,
+      buyerCookie,
       status: "pending",
       cartJson: "[]",
       createdAt: new Date().toISOString(),
     });
     if (!parsed.success) return res.status(400).json({ message: parsed.error.message });
-    const session = await storage.createPunchoutSession(parsed.data);
-    res.status(201).json({ session, catalog: AMAZON_CATALOG });
+    await storage.createPunchoutSession(parsed.data);
+
+    const requestCxml = buildSetupRequestCxml({
+      buyerCookie,
+      callbackUrl: `${appOrigin}/api/punchout/callback`,
+      userEmail: req.user!.email,
+      sharedSecret: PUNCHOUT_SHARED_SECRET,
+      ourIdentity: PUNCHOUT_OUR_IDENTITY,
+    });
+    try {
+      const responseCxml = await sendSetupRequestToSupplier(requestCxml, appOrigin);
+      const { startPageUrl } = parseSetupResponseCxml(responseCxml);
+      res.status(201).json({ startPageUrl });
+    } catch (err: any) {
+      res.status(502).json({ message: err?.message ?? "Punch-Out-Lieferant konnte nicht erreicht werden." });
+    }
   });
 
   app.get("/api/punchout/catalog", async (_req, res) => {
     res.json(AMAZON_CATALOG);
   });
 
-  // Simulated PunchOutOrderMessage callback: user submits their Amazon cart,
-  // we store it against the session so the frontend can pull it into the
-  // purchase request draft as line items.
-  app.post("/api/punchout/sessions/:id/return", async (req, res) => {
-    const cart = Array.isArray(req.body?.cart) ? req.body.cart : [];
-    const updated = await storage.updatePunchoutSession(Number(req.params.id), {
-      status: "returned",
-      cartJson: JSON.stringify(cart),
-      returnedAt: new Date().toISOString(),
-    });
-    if (!updated) return res.status(404).json({ message: "Punch-Out-Sitzung nicht gefunden." });
-    res.json(updated);
-  });
-
   app.get("/api/punchout/sessions/:id", async (req, res) => {
     const session = await storage.getPunchoutSession(Number(req.params.id));
     if (!session) return res.status(404).json({ message: "Punch-Out-Sitzung nicht gefunden." });
+    if (session.userId !== req.user!.id) {
+      return res.status(403).json({ message: "Für diese Punch-Out-Sitzung fehlt die Berechtigung." });
+    }
     res.json(session);
   });
 

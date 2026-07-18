@@ -22,6 +22,7 @@ import Contracts from "@/pages/contracts";
 import CostCenters from "@/pages/cost-centers";
 import Analytics from "@/pages/analytics";
 import Delegation from "@/pages/delegation";
+import PunchoutShop from "@/pages/punchout-shop";
 import NotFound from "@/pages/not-found";
 
 function AppRouter() {
@@ -50,32 +51,39 @@ function AuthenticatedShell() {
   };
 
   return (
-    <Router hook={useHashLocation}>
-      <SidebarProvider style={style as React.CSSProperties}>
-        <div className="flex h-screen w-full">
-          <AppSidebar />
-          <div className="flex flex-col flex-1 min-w-0">
-            <header className="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
-              <SidebarTrigger data-testid="button-sidebar-toggle" />
-              <div className="flex items-center gap-1">
-                <NotificationBell />
-                <ThemeToggle />
-              </div>
-            </header>
-            <main className="flex-1 overflow-y-auto">
-              <AppRouter />
-            </main>
-          </div>
+    <SidebarProvider style={style as React.CSSProperties}>
+      <div className="flex h-screen w-full">
+        <AppSidebar />
+        <div className="flex flex-col flex-1 min-w-0">
+          <header className="flex items-center justify-between px-3 py-2 border-b border-border shrink-0">
+            <SidebarTrigger data-testid="button-sidebar-toggle" />
+            <div className="flex items-center gap-1">
+              <NotificationBell />
+              <ThemeToggle />
+            </div>
+          </header>
+          <main className="flex-1 overflow-y-auto">
+            <AppRouter />
+          </main>
         </div>
-      </SidebarProvider>
-    </Router>
+      </div>
+    </SidebarProvider>
   );
 }
 
 function Gate() {
   const { user } = useAuth();
   if (!user) return <Login />;
-  return <AuthenticatedShell />;
+  return (
+    <Router hook={useHashLocation}>
+      <Switch>
+        {/* Bare page, no sidebar/header — reinforces that the user has "left" the app to
+            shop on the (mocked) Amazon Business site. */}
+        <Route path="/punchout/shop/:buyerCookie" component={PunchoutShop} />
+        <Route><AuthenticatedShell /></Route>
+      </Switch>
+    </Router>
+  );
 }
 
 function App() {
